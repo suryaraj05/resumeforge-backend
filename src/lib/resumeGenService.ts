@@ -1,4 +1,5 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import { getGeminiModelId } from './geminiModels';
 import { KnowledgeBase } from '../types/kb';
 import {
   RefinedResume,
@@ -7,9 +8,11 @@ import {
 } from '../types/resume';
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
-const MODEL = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
 
 const LONG_MS = 60_000;
+/** Long-form resume JSON can be large; allow a slower, higher-token generation. */
+const CURATOR_MS = 120_000;
+const CURATOR_MAX_OUTPUT_TOKENS = 16_384;
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   return Promise.race([
@@ -30,12 +33,44 @@ function extractJSON(raw: string): string {
 }
 
 async function geminiText(prompt: string, ms = LONG_MS): Promise<string> {
-  const model = genAI.getGenerativeModel({ model: MODEL });
+  const model = genAI.getGenerativeModel({ model: getGeminiModelId() });
   const result = await withTimeout(model.generateContent(prompt), ms);
   return result.response.text().trim();
 }
 
-const CURATOR_SYSTEM = `You are a professional resume curator. You will receive a user's complete knowledge base and a job description. Your task is to: 1) Score each experience bullet, project, skill, and achievement for relevance to the job description (1-10). 2) Select the highest-scoring items that fit within a one-page resume. 3) Rewrite selected bullet points to align with the JD's language while staying truthful. 4) Return ONLY a JSON object with this structure: { "targetRole": string, "summary": string, "education": array, "experience": array, "projects": array, "skills": object, "certifications": array, "achievements": array, "reasoning": { "included": [{ "item": string, "reason": string }], "excluded": [{ "item": string, "reason": string }] } }. Do not add explanation or markdown.`;
+async function geminiTextCurator(prompt: string): Promise<string> {
+  const model = genAI.getGenerativeModel({
+    model: getGeminiModelId(),
+    generationConfig: {
+      maxOutputTokens: CURATOR_MAX_OUTPUT_TOKENS,
+      temperature: 0.35,
+    },
+  });
+  const result = await withTimeout(model.generateContent(prompt), CURATOR_MS);
+  return result.response.text().trim();
+}
+
+const CURATOR_SYSTEM = `You are a professional resume curator. You will receive a user's complete knowledge base and a job description.
+
+OUTPUT SHAPE: LONG-FORM (approximately 2–4 pages when printed). Do NOT optimize for a single page. The user wants depth and completeness, not minimalism.
+
+Your task:
+1) Score each experience bullet, project, skill, and achievement for relevance to the job description (1–10).
+2) INCLUDE almost everything that is relevant (score ≥5) or plausibly transferable. Only omit items that are clearly unrelated to the role, duplicated, or empty. Do NOT cut material just to save space.
+3) For each retained job / experience entry: include 4–10 accomplishment bullets when the KB provides enough substance; merge or split KB lines as needed. If the KB only has short notes, expand into strong STAR-style bullets using ONLY truthful details from the KB (no invented employers, dates, metrics, or degrees).
+4) For each retained project: set "name", optional "date", "techStack" array, optional "description", and "highlights" with 3–8 bullets each when the KB supports it.
+5) Skills: populate technical, tools, languages, and soft arrays generously from the KB; group and dedupe lightly but prefer inclusion over a tiny keyword list.
+6) Summary: write a substantive professional summary (about 120–220 words unless the profile is very thin), tightly aligned to the JD.
+7) Education: include every education entry from the KB with degree, institution, dates, field, cgpa when present.
+8) Include certifications and achievements from the KB that relate to the role (or are impressive generally).
+9) Rewrite wording to mirror the JD's vocabulary where honest to do so.
+
+STRICT JSON TYPES: experience[].description, project[].highlights, project[].techStack, and skills.technical/tools/languages/soft must be arrays of plain strings only (never objects or nested structures). Same for all scalar fields (title, name, role, etc.): use strings only.
+
+Return ONLY a JSON object with this structure: { "targetRole": string, "summary": string, "education": array, "experience": array, "projects": array, "skills": object, "certifications": array, "achievements": array, "reasoning": { "included": [{ "item": string, "reason": string }], "excluded": [{ "item": string, "reason": string }] } }.
+In "reasoning.excluded", list only items you truly left out and why (irrelevant/duplicate/unsupported), not items you shortened for length.
+
+Do not add explanation or markdown outside the JSON.`;
 
 export async function generateRefinedResume(
   kb: KnowledgeBase,
@@ -49,7 +84,7 @@ ${jd}
 User's Full Knowledge Base:
 ${JSON.stringify(kb, null, 2)}`;
 
-  const raw = await geminiText(prompt);
+  const raw = await geminiTextCurator(prompt);
   const parsed = JSON.parse(extractJSON(raw)) as RefinedResume;
   return parsed;
 }

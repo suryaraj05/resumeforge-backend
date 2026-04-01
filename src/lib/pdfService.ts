@@ -3,13 +3,89 @@ import { RefinedResume } from '../types/resume';
 
 export type ResumeTemplateId = 'minimal' | 'modern' | 'academic';
 
+const OBJ_TEXT_KEYS = [
+  'text',
+  'bullet',
+  'line',
+  'content',
+  'description',
+  'title',
+  'item',
+  'value',
+  'detail',
+  'summary',
+  'body',
+  'point',
+  'achievement',
+  'name',
+  'label',
+] as const;
+
+/** Coerce LLM odd shapes to plain text (avoids "[object Object]" in PDF). */
+function displayText(v: unknown): string {
+  if (v == null) return '';
+  if (typeof v === 'string') return v.trim();
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+  if (Array.isArray(v)) {
+    return v
+      .map((x) => displayText(x))
+      .filter(Boolean)
+      .join(' ');
+  }
+  if (typeof v === 'object') {
+    const o = v as Record<string, unknown>;
+    for (const k of OBJ_TEXT_KEYS) {
+      const val = o[k];
+      if (typeof val === 'string' && val.trim()) return val.trim();
+    }
+    const direct = Object.values(o).filter(
+      (x): x is string => typeof x === 'string' && x.trim() !== ''
+    );
+    if (direct.length === 1) return direct[0]!.trim();
+    if (direct.length > 1) return direct.map((s) => s.trim()).join(' — ');
+    const nested = Object.values(o)
+      .map((x) => displayText(x))
+      .filter(Boolean);
+    if (nested.length) return nested.join(' — ');
+    try {
+      return JSON.stringify(v);
+    } catch {
+      return '';
+    }
+  }
+  return String(v);
+}
+
 function esc(s: unknown): string {
-  if (s == null) return '';
-  return String(s)
+  const raw = displayText(s);
+  return String(raw)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+/** LLM may return string | string[] | objects for bullets/highlights/stacks. */
+function asStringArray(v: unknown): string[] {
+  if (v == null) return [];
+  if (Array.isArray(v)) {
+    return v
+      .map((x) => displayText(x))
+      .filter((s) => s.length > 0);
+  }
+  if (typeof v === 'string') {
+    const t = v.trim();
+    if (!t) return [];
+    return t
+      .split(/\n+|;\s*/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+  if (typeof v === 'object') {
+    const one = displayText(v);
+    return one ? [one] : [];
+  }
+  return [displayText(v)].filter(Boolean);
 }
 
 const FONT_LINK = `<link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,600;0,700;1,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">`;
@@ -27,11 +103,47 @@ function baseStyles(): string {
 function skillsBlock(skills: RefinedResume['skills']): string {
   if (!skills) return '';
   const parts: string[] = [];
-  if (skills.technical?.length) parts.push(`<strong>Technical:</strong> ${esc(skills.technical.join(', '))}`);
-  if (skills.tools?.length) parts.push(`<strong>Tools:</strong> ${esc(skills.tools.join(', '))}`);
-  if (skills.languages?.length) parts.push(`<strong>Languages:</strong> ${esc(skills.languages.join(', '))}`);
-  if (skills.soft?.length) parts.push(`<strong>Soft:</strong> ${esc(skills.soft.join(', '))}`);
+  const tech = asStringArray(skills.technical);
+  const tools = asStringArray(skills.tools);
+  const langs = asStringArray(skills.languages);
+  const soft = asStringArray(skills.soft);
+  if (tech.length) parts.push(`<strong>Technical:</strong> ${esc(tech.join(', '))}`);
+  if (tools.length) parts.push(`<strong>Tools:</strong> ${esc(tools.join(', '))}`);
+  if (langs.length) parts.push(`<strong>Languages:</strong> ${esc(langs.join(', '))}`);
+  if (soft.length) parts.push(`<strong>Soft:</strong> ${esc(soft.join(', '))}`);
   return parts.join('<br/>');
+}
+
+function achievementsBlock(achievements: RefinedResume['achievements']): string {
+  const list = achievements ?? [];
+  if (!list.length) return '';
+  const rows = list
+    .map((a) => {
+      const t = esc(a.title);
+      const d = a.description ? ` — ${esc(a.description)}` : '';
+      const when = a.date ? ` <span class="mono">(${esc(a.date)})</span>` : '';
+      return `<div style="margin-bottom:0.3em"><strong>${t}</strong>${d}${when}</div>`;
+    })
+    .join('');
+  return `<h2>Achievements</h2>${rows}`;
+}
+
+function projectBlockModern(p: NonNullable<RefinedResume['projects']>[0]): string {
+  const title = `<strong>${esc(p.name)}</strong>${p.date ? ` <span class="mono" style="font-size:8.5pt">${esc(p.date)}</span>` : ''}`;
+  const stackArr = asStringArray(p.techStack);
+  const stack = stackArr.length
+    ? `<div class="mono" style="font-size:8.5pt;color:#555;margin-top:0.12em">Stack: ${esc(stackArr.join(', '))}</div>`
+    : '';
+  const desc = p.description ? `<div style="margin-top:0.15em;line-height:1.45">${esc(p.description)}</div>` : '';
+  const bullets = asStringArray(p.highlights).map((h) => `<li>${esc(h)}</li>`).join('');
+  const ul = bullets ? `<ul style="margin-top:0.2em">${bullets}</ul>` : '';
+  return `<div style="margin-bottom:0.55em">${title}${stack}${desc}${ul}</div>`;
+}
+
+function eduLineModern(e: NonNullable<RefinedResume['education']>[0]): string {
+  const cgpa = e.cgpa ? ` · CGPA: ${esc(e.cgpa)}` : '';
+  const field = e.field ? `, ${esc(e.field)}` : '';
+  return `<div style="margin-bottom:0.45em"><strong>${esc(e.institution)}</strong><br/><span class="mono">${esc(e.degree)}${field}${cgpa}</span></div>`;
 }
 
 export function buildResumeHtml(resume: RefinedResume, template: ResumeTemplateId): string {
@@ -46,19 +158,32 @@ function buildMinimalHtml(r: RefinedResume): string {
     .map((e) => {
       const head = `${esc(e.role)} — ${esc(e.company)}`;
       const dates = `${esc(e.startDate ?? '')} – ${esc(e.endDate ?? 'Present')}`;
-      const bullets = (e.description ?? []).map((d) => `<li>${esc(d)}</li>`).join('');
-      return `<div style="margin-bottom:0.65em"><div style="display:flex;justify-content:space-between;border-bottom:1px solid #000;padding-bottom:2px;margin-bottom:0.25em"><strong>${head}</strong><span class="mono">${dates}</span></div>${bullets ? `<ul>${bullets}</ul>` : ''}</div>`;
+      const ts = asStringArray(e.techStack);
+      const stack = ts.length
+        ? `<div class="mono" style="font-size:8.5pt;margin-top:0.12em">${esc(ts.join(', '))}</div>`
+        : '';
+      const bullets = asStringArray(e.description).map((d) => `<li>${esc(d)}</li>`).join('');
+      return `<div style="margin-bottom:0.65em"><div style="display:flex;justify-content:space-between;border-bottom:1px solid #000;padding-bottom:2px;margin-bottom:0.25em"><strong>${head}</strong><span class="mono">${dates}</span></div>${stack}${bullets ? `<ul>${bullets}</ul>` : ''}</div>`;
     })
     .join('');
 
   const edu = (r.education ?? [])
-    .map((e) => `<div class="mono" style="margin-bottom:0.35em">${esc(e.degree)} · ${esc(e.institution)} · ${esc(e.startDate ?? '')} – ${esc(e.endDate ?? '')}</div>`)
+    .map((e) => {
+      const extra = [e.field ? esc(e.field) : '', e.cgpa ? `CGPA ${esc(e.cgpa)}` : ''].filter(Boolean).join(' · ');
+      const suffix = extra ? ` · ${extra}` : '';
+      return `<div class="mono" style="margin-bottom:0.35em">${esc(e.degree)} · ${esc(e.institution)} · ${esc(e.startDate ?? '')} – ${esc(e.endDate ?? '')}${suffix}</div>`;
+    })
     .join('');
 
   const proj = (r.projects ?? [])
     .map((p) => {
-      const bullets = (p.highlights ?? []).map((h) => `<li>${esc(h)}</li>`).join('');
-      return `<div style="margin-bottom:0.5em"><strong>${esc(p.name)}</strong>${p.description ? ` — ${esc(p.description)}` : ''}${bullets ? `<ul>${bullets}</ul>` : ''}</div>`;
+      const date = p.date ? ` <span class="mono">(${esc(p.date)})</span>` : '';
+      const pts = asStringArray(p.techStack);
+      const stack = pts.length
+        ? `<div class="mono" style="font-size:8pt;margin-top:0.08em">${esc(pts.join(', '))}</div>`
+        : '';
+      const bullets = asStringArray(p.highlights).map((h) => `<li>${esc(h)}</li>`).join('');
+      return `<div style="margin-bottom:0.5em"><strong>${esc(p.name)}</strong>${date}${p.description ? ` — ${esc(p.description)}` : ''}${stack}${bullets ? `<ul>${bullets}</ul>` : ''}</div>`;
     })
     .join('');
 
@@ -71,6 +196,7 @@ function buildMinimalHtml(r: RefinedResume): string {
   ${r.summary ? `<p style="margin-bottom:0.5em">${esc(r.summary)}</p>` : ''}
   <hr class="rule"/>
   ${r.experience?.length ? `<h2>Experience</h2>${exp}` : ''}
+  ${achievementsBlock(r.achievements)}
   ${r.education?.length ? `<h2>Education</h2>${edu}` : ''}
   ${r.projects?.length ? `<h2>Projects</h2>${proj}` : ''}
   ${skillsBlock(r.skills) ? `<h2>Skills</h2><p>${skillsBlock(r.skills)}</p>` : ''}
@@ -80,14 +206,16 @@ function buildMinimalHtml(r: RefinedResume): string {
 function buildModernHtml(r: RefinedResume): string {
   const exp = (r.experience ?? [])
     .map((e) => {
-      const bullets = (e.description ?? []).map((d) => `<li>${esc(d)}</li>`).join('');
-      return `<div style="margin-bottom:0.55em"><div style="font-weight:700">${esc(e.role)}</div><div class="mono" style="color:#555">${esc(e.company)} · ${esc(e.startDate ?? '')} – ${esc(e.endDate ?? '')}</div>${bullets ? `<ul>${bullets}</ul>` : ''}</div>`;
+      const bullets = asStringArray(e.description).map((d) => `<li>${esc(d)}</li>`).join('');
+      const mts = asStringArray(e.techStack);
+      const stack = mts.length
+        ? `<div class="mono" style="font-size:8.5pt;color:#555;margin-top:0.1em">Stack: ${esc(mts.join(', '))}</div>`
+        : '';
+      return `<div style="margin-bottom:0.55em"><div style="font-weight:700">${esc(e.role)}</div><div class="mono" style="color:#555">${esc(e.company)} · ${esc(e.startDate ?? '')} – ${esc(e.endDate ?? '')}</div>${stack}${bullets ? `<ul>${bullets}</ul>` : ''}</div>`;
     })
     .join('');
 
-  const leftEdu = (r.education ?? [])
-    .map((e) => `<div style="margin-bottom:0.45em"><strong>${esc(e.institution)}</strong><br/><span class="mono">${esc(e.degree)}</span></div>`)
-    .join('');
+  const leftEdu = (r.education ?? []).map((e) => eduLineModern(e)).join('');
 
   const leftSkills = skillsBlock(r.skills);
 
@@ -110,7 +238,8 @@ function buildModernHtml(r: RefinedResume): string {
       <h1>${esc(r.targetRole || 'Candidate')}</h1>
       ${r.summary ? `<p style="margin-bottom:0.6em;line-height:1.5">${esc(r.summary)}</p>` : ''}
       <h2>Experience</h2>${exp || '<p class="mono">—</p>'}
-      ${r.projects?.length ? `<h2>Projects</h2>${r.projects.map((p) => `<div style="margin-bottom:0.45em"><strong>${esc(p.name)}</strong>${p.description ? `<br/>${esc(p.description)}` : ''}</div>`).join('')}` : ''}
+      ${achievementsBlock(r.achievements)}
+      ${r.projects?.length ? `<h2>Projects</h2>${r.projects.map((p) => projectBlockModern(p)).join('')}` : ''}
     </div>
   </div>
   </body></html>`;
@@ -124,14 +253,25 @@ function buildAcademicHtml(r: RefinedResume): string {
 
   const exp = (r.experience ?? [])
     .map((e) => {
-      const bullets = (e.description ?? []).map((d) => `<li>${esc(d)}</li>`).join('');
-      return `<div style="margin-bottom:0.55em"><div><strong>${esc(e.role)}</strong>, ${esc(e.company)} <span class="mono">(${esc(e.startDate ?? '')}–${esc(e.endDate ?? '')})</span></div>${bullets ? `<ul>${bullets}</ul>` : ''}</div>`;
+      const bullets = asStringArray(e.description).map((d) => `<li>${esc(d)}</li>`).join('');
+      const ats = asStringArray(e.techStack);
+      const stack = ats.length
+        ? `<div class="mono" style="font-size:8.5pt;margin-top:0.1em">Stack: ${esc(ats.join(', '))}</div>`
+        : '';
+      return `<div style="margin-bottom:0.55em"><div><strong>${esc(e.role)}</strong>, ${esc(e.company)} <span class="mono">(${esc(e.startDate ?? '')}–${esc(e.endDate ?? '')})</span></div>${stack}${bullets ? `<ul>${bullets}</ul>` : ''}</div>`;
     })
     .join('');
 
   const edu = (r.education ?? [])
-    .map((e) => `<div style="margin-bottom:0.35em">${esc(e.degree)} in ${esc(e.field || '')}, ${esc(e.institution)}, ${esc(e.startDate ?? '')}–${esc(e.endDate ?? '')}</div>`)
+    .map((e) => {
+      const field = e.field ? ` in ${esc(e.field)}` : '';
+      const cgpa = e.cgpa ? ` · CGPA ${esc(e.cgpa)}` : '';
+      return `<div style="margin-bottom:0.35em">${esc(e.degree)}${field}, ${esc(e.institution)}, ${esc(e.startDate ?? '')}–${esc(e.endDate ?? '')}${cgpa}</div>`;
+    })
     .join('');
+
+  const projBlock =
+    r.projects?.length ? `<h2>Projects</h2>${r.projects.map((p) => projectBlockModern(p)).join('')}` : '';
 
   return `<!DOCTYPE html><html><head><meta charset="utf-8">${FONT_LINK}<style>${baseStyles()}
   h1 { font-size: 14pt; text-align:center; text-transform:uppercase; letter-spacing:0.08em; margin-bottom:0.15em; }
@@ -143,7 +283,8 @@ function buildAcademicHtml(r: RefinedResume): string {
   ${r.summary ? `<p style="text-align:justify;margin-bottom:0.5em">${esc(r.summary)}</p>` : ''}
   <h2>Education</h2>${edu}
   <h2>Experience</h2>${exp}
-  ${r.projects?.length ? `<h2>Projects</h2><ul>${r.projects.map((p) => `<li><strong>${esc(p.name)}</strong>${p.description ? ` — ${esc(p.description)}` : ''}</li>`).join('')}</ul>` : ''}
+  ${achievementsBlock(r.achievements)}
+  ${projBlock}
   ${skillsBlock(r.skills) ? `<h2>Technical Skills</h2><p>${skillsBlock(r.skills)}</p>` : ''}
   ${pubBlock}
   </body></html>`;
@@ -158,9 +299,11 @@ export function buildCoverLetterHtml(body: string): string {
 }
 
 export async function htmlToPdfBuffer(html: string): Promise<Buffer> {
+  const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH?.trim();
   const browser = await puppeteer.launch({
     headless: true,
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+    ...(executablePath ? { executablePath } : {}),
   });
   try {
     const page = await browser.newPage();

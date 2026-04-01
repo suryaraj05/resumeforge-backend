@@ -1,5 +1,6 @@
 import type { RefinedResume, ATSScoreResult, JobFitResult } from './resume';
 import type { PeerComparisonResult } from './groups';
+import type { WeakSpotReport } from './jobs';
 
 export type ChatRole = 'user' | 'bot';
 
@@ -18,7 +19,14 @@ export type ChatIntent =
   | 'job_fit'
   | 'roast_resume'
   | 'interview_prep'
-  | 'chitchat';
+  | 'job_search'
+  | 'job_prepare'
+  | 'tracker_query'
+  | 'interview_train'
+  | 'weak_spots'
+  | 'chitchat'
+  /** Internal: intent routing failed; reply is shown as chitchat without a second LLM call */
+  | 'router_failed';
 
 export interface StoredChatMessage {
   id: string;
@@ -51,6 +59,9 @@ export interface IntentRouterResult {
 export interface InterviewQuestion {
   q: string;
   hint: string;
+  /** First-person answer draft grounded in KB (and JD when applicable). */
+  answer?: string;
+  type?: string;
 }
 
 export interface KBPatchResult {
@@ -75,6 +86,8 @@ export interface ChatResponseData {
   refinedResume?: RefinedResume;
   reasoning?: RefinedResume['reasoning'];
   atsScore?: ATSScoreResult;
+  /** generate_resume: JD too short — client should prompt for full JD */
+  awaitingJobDescription?: boolean;
   jd?: string;
   coverLetterText?: string;
   jobFit?: JobFitResult;
@@ -110,6 +123,25 @@ export interface ChatResponseData {
   };
   peerComparison?: PeerComparisonResult;
   publicProfileUrl?: string;
+  // Phase 7 — jobs / tracker / interview career
+  jobCards?: {
+    jobId: string;
+    title: string;
+    company: string;
+    fitScore: number;
+    location: string;
+    whyThisRole: string;
+  }[];
+  applicationStats?: {
+    total: number;
+    applied: number;
+    interviews: number;
+    offers: number;
+    interviewRate: number;
+  };
+  weakSpotReport?: WeakSpotReport;
+  interviewSessionId?: string;
+  interviewSessionUrl?: string;
 }
 
 export interface ChatResponse {

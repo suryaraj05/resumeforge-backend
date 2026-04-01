@@ -5,9 +5,18 @@ import path from 'path';
 // Load .env from apps/api (dev) or cwd (deploy)
 dotenv.config({ path: path.resolve(process.cwd(), '.env') });
 
+function normalizeServiceAccountJsonString(raw: string): string {
+  let s = raw.trim();
+  if (s.charCodeAt(0) === 0xfeff) {
+    s = s.slice(1).trim();
+  }
+  return s;
+}
+
 function getAdminCredential(): admin.ServiceAccount {
-  const json = process.env.FIREBASE_SERVICE_ACCOUNT_JSON?.trim();
-  if (json) {
+  const jsonRaw = process.env.FIREBASE_SERVICE_ACCOUNT_JSON?.trim();
+  if (jsonRaw) {
+    const json = normalizeServiceAccountJsonString(jsonRaw);
     try {
       const parsed = JSON.parse(json) as Record<string, unknown>;
       const projectId = String(parsed.project_id ?? parsed.projectId ?? '');
@@ -19,8 +28,10 @@ function getAdminCredential(): admin.ServiceAccount {
       }
       return { projectId, clientEmail, privateKey };
     } catch (e) {
+      const hint =
+        'Use valid JSON (double quotes on every key). One line in .env, or delete this var and set FIREBASE_ADMIN_PROJECT_ID, FIREBASE_ADMIN_CLIENT_EMAIL, FIREBASE_ADMIN_PRIVATE_KEY instead.';
       throw new Error(
-        `Invalid FIREBASE_SERVICE_ACCOUNT_JSON: ${e instanceof Error ? e.message : 'parse error'}`
+        `Invalid FIREBASE_SERVICE_ACCOUNT_JSON: ${e instanceof Error ? e.message : 'parse error'}. ${hint}`
       );
     }
   }
@@ -53,7 +64,16 @@ if (!admin.apps.length) {
   });
 }
 
-export const db = admin.firestore();
+const firestore = admin.firestore();
+// Job listings include optional fields (salary, applyUrl, …) that are often undefined;
+// Firestore rejects undefined unless stripped.
+try {
+  firestore.settings({ ignoreUndefinedProperties: true });
+} catch {
+  /* already applied (e.g. dev hot reload) */
+}
+
+export const db = firestore;
 export const auth = admin.auth();
 export const storage = admin.storage();
 export default admin;

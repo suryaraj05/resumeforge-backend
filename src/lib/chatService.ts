@@ -1,5 +1,6 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { v4 as uuidv4 } from 'uuid';
+import { getGeminiFetchStatus } from './gemini';
 import { db } from './firebase';
 import { getKB } from './kbService';
 import { getSession, saveSession } from './sessionService';
@@ -28,11 +29,20 @@ import {
   StoredChatMessage,
 } from '../types/chat';
 
+import { getGeminiModelId } from './geminiModels';
+import { saveInterviewPrep, normalizeStoredQuestions } from './interviewPrepStorage';
+import {
+  handleJobSearchIntent,
+  handleJobPrepareIntent,
+  handleTrackerQueryIntent,
+  handleInterviewTrainIntent,
+  handleWeakSpotsIntent,
+} from './jobChatHandlers';
+
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
-const MODEL = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
 
 const TIMEOUT_MS = 15000;
-const LONG_TIMEOUT_MS = 90000;
+const LONG_TIMEOUT_MS = 130_000;
 const TIMEOUT_REPLY = "I took too long to think. Could you rephrase that?";
 const CHAT_HISTORY_CAP = 100;
 const GEMINI_HISTORY_LIMIT = 10;
@@ -66,7 +76,7 @@ function extractJSON(raw: string): string {
 // ─── Gemini helper ────────────────────────────────────────────────────────────
 
 async function geminiText(prompt: string): Promise<string> {
-  const model = genAI.getGenerativeModel({ model: MODEL });
+  const model = genAI.getGenerativeModel({ model: getGeminiModelId() });
   const result = await withTimeout(model.generateContent(prompt));
   return result.response.text().trim();
 }
@@ -135,7 +145,14 @@ const HELP_MESSAGE = `Here's everything I can do:
 
 **Interview Prep**
 • Interview questions — "Prep me for interviews" or "Interview prep"
+• Job-specific mock interview — "Prep me for my Google interview" (needs saved application + JD)
 • Resume roast — "Roast my resume"
+
+**Jobs & Applications (Phase 7)**
+• Find jobs — "Find jobs for me", "Search ML engineer roles in US"
+• Application pack — "Prepare application pack" (opens Jobs flow)
+• Tracker — "Show my applications", "Move Stripe to interview stage"
+• Skill gaps — "What skills am I missing?"
 
 **Groups & Collaboration**
 • Create a group — "Create a group named ..."
@@ -153,7 +170,7 @@ The reply field is what the chatbot says to the user before executing the intent
 Available intents:
 - update_kb: user wants to update their profile/resume info. params must include { "section": string, "description": string } where section is one of personal/education/experience/projects/skills/certifications/achievements/publications.
 - ask_kb: user asks something about their own profile. params: { "section": string or "all" }.
-- generate_resume: user wants to create a tailored resume for a specific job. If the user pasted a job description, put the FULL text in params.jd. If they only asked without JD, omit jd.
+- generate_resume: user wants to create a tailored resume for a specific job. If the user pasted a job description, put the FULL text in params.jd. If they only asked without JD, omit jd. IMPORTANT: If the latest user message is mostly a pasted job posting (long text with responsibilities, requirements, qualifications, role title, or tech stack) — even with a short intro like "here is the JD" — use generate_resume and put the entire message in params.jd. Do NOT classify a pasted JD as chitchat.
 - job_fit: user asks how well they fit a role (qualitative). params: { jd?: string } if JD is in the message.
 - upload_resume: user wants to upload a new resume PDF.
 - group_create: create a collaboration group. params: { name?: string } — if user gives the name in the message, include it.
@@ -164,8 +181,13 @@ Available intents:
 - ats_check: check resume ATS compatibility score.
 - cover_letter: generate a cover letter.
 - roast_resume: give honest, blunt critique of resume.
-- interview_prep: generate likely interview questions from resume.
-- chitchat: general conversation unrelated to resume.`;
+- interview_prep: generate likely interview questions from resume (general).
+- job_search: user wants a personalized job feed / listings. params: { query?: string, location?: string }.
+- job_prepare: user wants tailored resume + cover letter + ATS for a specific role. params optional.
+- tracker_query: view or update Kanban applications. params: { company?: string, targetStatus?: string } for moves.
+- interview_train: job-specific timed or chat mock interview. params: { company?: string, role?: string, mode?: "chat_qa"|"timed_mock", focus?: "technical"|"behavioral"|"mixed" }.
+- weak_spots: user wants skill gap report from last job search.
+- chitchat: general conversation unrelated to resume. Never use chitchat for pasted job descriptions or for questions about whether resume generation finished or where the resume is.`;
 
 async function routeIntent(
   message: string,
@@ -174,20 +196,48 @@ async function routeIntent(
   const historyStr = formatHistoryForGemini(history);
   const prompt = `${INTENT_SYSTEM}\n\nConversation history:\n${historyStr || '(none)'}\n\nUser's latest message:\n${message}`;
 
-  const raw = await geminiText(prompt);
-  const parsed = JSON.parse(extractJSON(raw)) as IntentRouterResult;
+  try {
+    const raw = await geminiText(prompt);
+    const parsed = JSON.parse(extractJSON(raw)) as IntentRouterResult;
 
-  const validIntents: ChatIntent[] = [
-    'update_kb', 'ask_kb', 'generate_resume', 'upload_resume',
-    'group_create', 'group_add_member', 'group_update', 'peer_compare', 'share_profile',
-    'ats_check', 'cover_letter', 'job_fit', 'roast_resume', 'interview_prep', 'chitchat',
-  ];
+    const validIntents: ChatIntent[] = [
+      'update_kb', 'ask_kb', 'generate_resume', 'upload_resume',
+      'group_create', 'group_add_member', 'group_update', 'peer_compare', 'share_profile',
+      'ats_check', 'cover_letter', 'job_fit', 'roast_resume', 'interview_prep',
+      'job_search', 'job_prepare', 'tracker_query', 'interview_train', 'weak_spots',
+      'chitchat',
+    ];
 
-  if (!validIntents.includes(parsed.intent as ChatIntent)) {
-    parsed.intent = 'chitchat';
+    if (!validIntents.includes(parsed.intent as ChatIntent)) {
+      parsed.intent = 'chitchat';
+    }
+
+    return parsed;
+  } catch (err) {
+    const st = getGeminiFetchStatus(err);
+    if (st === 429) {
+      return {
+        intent: 'router_failed',
+        params: {},
+        reply:
+          'Gemini hit a rate or quota limit, so I cannot answer yet. Wait a few minutes, check usage in Google AI Studio, or enable billing. You can still use Import KB from JSON in Settings without the API.',
+      };
+    }
+    if (st === 404) {
+      return {
+        intent: 'router_failed',
+        params: {},
+        reply:
+          'The Gemini model in your server config is not available (404). Set GEMINI_MODEL in apps/api/.env to a model your API key supports.',
+      };
+    }
+    return {
+      intent: 'router_failed',
+      params: {},
+      reply:
+        "I couldn't reach the AI (routing step). Check GEMINI_API_KEY, network, and API logs. For profiles without chat AI, use Settings → Import KB from JSON.",
+    };
   }
-
-  return parsed;
 }
 
 // ─── Intent handlers ──────────────────────────────────────────────────────────
@@ -254,10 +304,16 @@ ${kbJson}`;
   return geminiText(prompt);
 }
 
-async function handleInterviewPrep(kb: KnowledgeBase): Promise<InterviewQuestion[]> {
+async function handleInterviewPrep(userId: string, kb: KnowledgeBase): Promise<InterviewQuestion[]> {
   const kbContext = serializeKBForContext(kb);
 
-  const prompt = `You are an interview coach. Based on the candidate's resume below, generate 8-10 likely interview questions they will face, with a brief (1-sentence) personalized answer hint for each. Return ONLY a JSON array with this structure: [{ "q": "question text", "hint": "personalized hint referencing their actual experience" }].
+  const prompt = `You are an interview coach. Based on the candidate's resume below, generate 8-10 likely interview questions they will face.
+
+For each item use this JSON shape: { "type"?: string (e.g. Behavioral, Technical), "q": string, "hint": string, "answer": string }.
+- "hint": one short personalized hint referencing their actual experience.
+- "answer": first-person draft (2-4 sentences) they could say aloud; ground ONLY in the resume below; do not invent employers, dates, or metrics.
+
+Return ONLY a JSON array, no markdown.
 
 Resume summary:
 ${kbContext}`;
@@ -268,8 +324,24 @@ ${kbContext}`;
   const arrEnd = clean.lastIndexOf(']');
   const jsonStr = arrStart !== -1 && arrEnd !== -1 ? clean.slice(arrStart, arrEnd + 1) : clean;
 
-  const arr = JSON.parse(jsonStr) as InterviewQuestion[];
-  return arr.filter((q) => typeof q.q === 'string' && typeof q.hint === 'string').slice(0, 10);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(jsonStr);
+  } catch {
+    return [];
+  }
+  const normalized = normalizeStoredQuestions(parsed).slice(0, 10);
+  if (normalized.length) {
+    await saveInterviewPrep(userId, 'general', normalized, null);
+  }
+  return normalized
+    .map((s) => ({
+      q: (s.q || s.question || '').trim(),
+      hint: s.hint,
+      answer: s.answer || undefined,
+      type: s.type,
+    }))
+    .filter((q) => q.q.length > 0);
 }
 
 async function handleChitchat(
@@ -280,12 +352,83 @@ async function handleChitchat(
 
   const prompt = `You are ResumeForge, a friendly AI assistant for resume building and career advice. Answer the user's message naturally. Keep responses concise (2-4 sentences).
 
+Rules:
+- You cannot see the app's Resume Preview panel or whether a resume PDF was actually built. Never say a tailored resume "is ready", "has been generated", or "check the preview" unless you are only giving general how-to advice.
+- If they ask whether generation ran or why the preview is empty, say you are not connected to that state and suggest they open the Resume Preview tab, refresh, or paste the full job description again (100+ characters) to trigger generation.
+
 Conversation history:
 ${historyStr || '(none)'}
 
 User: ${message}`;
 
   return geminiText(prompt);
+}
+
+/** User asking if generation ran / why preview is empty — answer from real session, not LLM fiction. */
+function isResumeGenerationStatusQuery(message: string): boolean {
+  const m = message.toLowerCase();
+  const topic =
+    m.includes('generat') ||
+    m.includes('resume') ||
+    m.includes('preview') ||
+    m.includes('tailored') ||
+    m.includes('ats');
+  const doubtOrWhere =
+    m.includes("n't") ||
+    m.includes('not ') ||
+    m.includes('still ') ||
+    m.includes('where ') ||
+    m.includes('when ') ||
+    m.includes('why ') ||
+    m.includes('haven') ||
+    m.includes('empty') ||
+    m.includes('nothing') ||
+    m.includes('placeholder') ||
+    m.includes('without') ||
+    m.includes('start') ||
+    m.includes('started') ||
+    m.includes('finish') ||
+    m.includes('ready') ||
+    m.includes('missing') ||
+    m.includes('working');
+  return topic && doubtOrWhere;
+}
+
+function sessionHasUsableResume(session: Awaited<ReturnType<typeof getSession>>): boolean {
+  const r = session?.latestResume;
+  if (!r || typeof r !== 'object') return false;
+  const o = r as Record<string, unknown>;
+  return Boolean(
+    o.targetRole ||
+      o.summary ||
+      (Array.isArray(o.experience) && o.experience.length > 0) ||
+      (Array.isArray(o.projects) && o.projects.length > 0)
+  );
+}
+
+async function resumeGenerationStatusResponse(userId: string): Promise<ChatResponse> {
+  const session = await getSession(userId);
+  if (sessionHasUsableResume(session)) {
+    const score = session!.lastAts?.score;
+    return {
+      intent: 'chitchat',
+      reply: `Your session **does** have a last generated resume (ATS was ${score != null ? `${score}/100` : 'scored earlier'}). Open the **Resume Preview** tab — the UI should load it from here. If you still see the placeholder, try clicking **Resume Preview** again or refresh the page. If you never saw a message starting with "Done — I've built…", say **Regenerate** and paste the full JD in one message (100+ characters).`,
+      data: {
+        refinedResume: session!.latestResume,
+        atsScore: session!.lastAts,
+        jd: session!.jd,
+        suggestions: ['Check my ATS score', 'Generate a cover letter', 'Regenerate with a new JD'],
+      },
+    };
+  }
+  return {
+    intent: 'chitchat',
+    reply: `There is **no** tailored resume saved in your session yet — so the preview panel will stay empty until generation succeeds. Paste the **full job description** in one message (about 100+ characters from the posting). I'll reply with "Done — I've built…" when it actually finishes. Short lines like only "generate my resume" are not enough on their own.`,
+    data: {
+      awaitingJobDescription: true,
+      suggestions: ['Here is the job description:', 'Generate resume for a software engineer role'],
+    },
+  };
 }
 
 // ─── Suggestion chips per intent ──────────────────────────────────────────────
@@ -302,6 +445,11 @@ const SUGGESTIONS_MAP: Partial<Record<ChatIntent, string[]>> = {
   job_fit: ['Add missing skills to my profile', 'Generate a tailored resume', 'Interview prep'],
   group_create: ['Add a member with their user ID', 'Tell my group we won a hackathon'],
   share_profile: ['Generate a tailored resume', 'Compare me to my group'],
+  job_search: ['Show my applications', 'What skills am I missing?', 'Prep me for interviews'],
+  job_prepare: ['Find jobs for me', 'Show my applications'],
+  tracker_query: ['Find jobs for me', 'What skills am I missing?'],
+  interview_train: ['Show my applications', 'Find jobs for me'],
+  weak_spots: ['Find jobs for me', 'Update my skills'],
 };
 
 // ─── Firestore chat history ───────────────────────────────────────────────────
@@ -489,12 +637,24 @@ export async function processMessage(
   }
 
   const { intent, params, reply } = intentResult;
+
+  if (intent === 'chitchat' && isResumeGenerationStatusQuery(message)) {
+    return resumeGenerationStatusResponse(userId);
+  }
+
   const data: ChatResponseData = {
     suggestions: SUGGESTIONS_MAP[intent as ChatIntent],
   };
 
   try {
     switch (intent as ChatIntent) {
+      case 'router_failed':
+        return {
+          intent: 'chitchat',
+          reply,
+          data: {},
+        };
+
       case 'update_kb': {
         const section = params.section || 'personal';
         const description = params.description || message;
@@ -558,7 +718,7 @@ export async function processMessage(
         if (!kb) {
           return { intent: 'interview_prep', reply: "Upload your resume first so I can tailor the questions to you!", data };
         }
-        const questions = await withTimeout(handleInterviewPrep(kb));
+        const questions = await withTimeout(handleInterviewPrep(userId, kb));
         return {
           intent: 'interview_prep',
           reply,
@@ -582,9 +742,9 @@ export async function processMessage(
           return {
             intent: 'generate_resume',
             reply:
-              reply ||
-              "Paste the full job description below and I'll curate a one-page, JD-aligned resume from your knowledge base.",
+              "I haven’t started yet — I need the **full job description** (about 100+ characters) in your next message. Paste the JD text from the posting, then I’ll build your tailored resume and ATS score in the Resume Preview panel.",
             data: {
+              awaitingJobDescription: true,
               suggestions: [
                 'Here is the job description:',
                 'Generate resume for a software engineer role',
@@ -605,7 +765,7 @@ export async function processMessage(
         await saveSession(userId, { jd, latestResume: refined, lastAts: ats });
         return {
           intent: 'generate_resume',
-          reply: `Done — I've built a tailored one-page resume. Open the Resume Preview panel to switch templates (Minimal / Modern / Academic), see your ATS score (${ats.score}/100), and download PDF or JSON. Expand "Why these items?" below for transparency.`,
+          reply: `Done — I've built a long-form tailored resume (full depth from your profile, aligned to the JD). Open the Resume Preview panel to switch templates (Minimal / Modern / Academic), see your ATS score (${ats.score}/100), and download PDF or JSON. Expand "Why these items?" below for transparency.`,
           data: {
             refinedResume: refined,
             reasoning: refined.reasoning,
@@ -875,6 +1035,67 @@ export async function processMessage(
         };
       }
 
+      case 'job_search': {
+        try {
+          const out = await withLongTimeout(handleJobSearchIntent(userId, params));
+          return { intent: 'job_search', reply: out.reply, data: out.data };
+        } catch (e) {
+          console.error('[job_search]', e);
+          return {
+            intent: 'job_search',
+            reply: "I couldn't complete job search. Ensure your KB exists and API keys are set for job providers.",
+            data: { suggestions: SUGGESTIONS_MAP.job_search },
+          };
+        }
+      }
+
+      case 'job_prepare': {
+        const out = handleJobPrepareIntent();
+        return { intent: 'job_prepare', reply: out.reply, data: out.data };
+      }
+
+      case 'tracker_query': {
+        try {
+          const out = await withTimeout(handleTrackerQueryIntent(userId, message));
+          return { intent: 'tracker_query', reply: out.reply, data: out.data };
+        } catch (e) {
+          console.error('[tracker_query]', e);
+          return {
+            intent: 'tracker_query',
+            reply: 'Could not load your applications.',
+            data: {},
+          };
+        }
+      }
+
+      case 'interview_train': {
+        try {
+          const out = await withLongTimeout(handleInterviewTrainIntent(userId, message, params));
+          return { intent: 'interview_train', reply: out.reply, data: out.data };
+        } catch (e) {
+          console.error('[interview_train]', e);
+          return {
+            intent: 'interview_train',
+            reply: "Couldn't start interview training. Check Gemini quota or save a job with a JD first.",
+            data: { suggestions: SUGGESTIONS_MAP.interview_train },
+          };
+        }
+      }
+
+      case 'weak_spots': {
+        try {
+          const out = await withTimeout(handleWeakSpotsIntent(userId));
+          return { intent: 'weak_spots', reply: out.reply, data: out.data };
+        } catch (e) {
+          console.error('[weak_spots]', e);
+          return {
+            intent: 'weak_spots',
+            reply: 'Could not load skill gaps.',
+            data: {},
+          };
+        }
+      }
+
       case 'chitchat':
       default: {
         const chitchatReply = await withTimeout(handleChitchat(message, history));
@@ -882,7 +1103,20 @@ export async function processMessage(
       }
     }
   } catch (err) {
+    console.error('[processMessage]', intent, err);
     const isTimeout = err instanceof Error && err.message === 'TIMEOUT';
+    if (intent === 'generate_resume') {
+      return {
+        intent: 'generate_resume',
+        reply: isTimeout
+          ? 'Resume generation timed out — try again with the same JD, or a slightly shorter posting.'
+          : "I couldn't finish building your resume (the model response may have been invalid). Paste the **full job description** again in one message, or try regenerating.",
+        data: {
+          awaitingJobDescription: true,
+          suggestions: ['Here is the job description:', 'Generate resume for a software engineer role'],
+        },
+      };
+    }
     return {
       intent: intent as ChatIntent,
       reply: isTimeout ? TIMEOUT_REPLY : reply,

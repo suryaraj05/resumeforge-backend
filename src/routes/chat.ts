@@ -7,9 +7,16 @@ import { getKB } from '../lib/kbService';
 import { db } from '../lib/firebase';
 import { ChatContinuation, StoredChatMessage } from '../types/chat';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import { getGeminiModelId } from '../lib/geminiModels';
+import { getSession } from '../lib/sessionService';
+import {
+  jdFingerprint,
+  saveInterviewPrep,
+  getAllInterviewPrep,
+  normalizeStoredQuestions,
+} from '../lib/interviewPrepStorage';
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
-const MODEL = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
 
 const router = Router();
 
@@ -109,13 +116,45 @@ router.delete('/history', verifyToken, async (req: AuthRequest, res: Response): 
 });
 
 /**
+ * GET /api/chat/interview-prep
+ * Returns saved questionnaires (general + role) and whether session JD differs from saved role prep.
+ */
+router.get('/interview-prep', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const uid = req.uid!;
+    const { general, role } = await getAllInterviewPrep(uid);
+    const session = await getSession(uid);
+    const sessionJd = typeof session?.jd === 'string' ? session.jd.trim() : '';
+    let jdStale = false;
+    if (role?.jdFingerprint) {
+      if (sessionJd.length < 80) {
+        jdStale = true;
+      } else {
+        jdStale = jdFingerprint(sessionJd) !== role.jdFingerprint;
+      }
+    }
+    res.json({ general, role, jdStale });
+  } catch (err) {
+    console.error('[GET /chat/interview-prep]', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
  * POST /api/chat/interview-prep
- * Accepts { jd?: string }. Returns interview questions tailored to user's KB.
- * GEMINI_COST_ESTIMATE: ~2000-3000 input tokens (full KB + JD), ~600 output tokens
+ * Accepts { jd?: string, mode?: 'general' | 'role' }.
+ * - general: role-agnostic prep (no specific employer/JD).
+ * - role: requires jd; questions aligned to posting + KB.
+ * Persists result under users/{uid}/interviewPrep/{general|role}.
  */
 router.post('/interview-prep', verifyToken, geminiRateLimit, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const { jd } = req.body as { jd?: string };
+    const body = req.body as { jd?: string; mode?: string };
+    const jdTrim = typeof body.jd === 'string' ? body.jd.trim() : '';
+    const modeParam = body.mode === 'general' || body.mode === 'role' ? body.mode : undefined;
+    const mode: 'general' | 'role' =
+      modeParam ?? (jdTrim.length > 0 ? 'role' : 'general');
+
     const uid = req.uid!;
     const kb = await getKB(uid);
     if (!kb) {
@@ -123,21 +162,60 @@ router.post('/interview-prep', verifyToken, geminiRateLimit, async (req: AuthReq
       return;
     }
 
-    const kbJson = JSON.stringify(kb, null, 2);
-    const jdSection = jd?.trim()
-      ? `Target JD (if provided):\n\`\`\`\n${jd.trim()}\n\`\`\``
-      : 'Target JD: (not provided — use general software engineering/tech role)';
+    if (mode === 'role' && jdTrim.length < 80) {
+      res.status(400).json({
+        error:
+          'Role-specific prep needs a full job description (about 80+ characters). Generate a resume from a JD first or paste the posting.',
+      });
+      return;
+    }
 
-    const prompt = `You are a senior technical interviewer. Given a candidate's resume knowledge base and optionally a target job description, generate 10 likely interview questions. Mix: 3 technical questions based on their specific projects/skills, 3 behavioral questions based on their experience, 2 situational questions, 2 role-specific questions. For each question, give a 2-3 sentence hint on what a strong answer would include. Return ONLY JSON: { "questions": [{ "type": string, "question": string, "hint": string }] }. Do not add explanation or markdown.
+    const kbJson = JSON.stringify(kb, null, 2);
+
+    const jsonShape =
+      'Return ONLY JSON: { "questions": [{ "type": string, "question": string, "hint": string, "answer": string }] }. Do not add explanation or markdown. Each "answer" must be a first-person speaking draft (2–5 sentences) grounded ONLY in the KB' +
+      (mode === 'role' ? ' and the job description above' : '') +
+      '; do not invent employers, titles, dates, or metrics not present. If the KB lacks detail for a strong answer, say what they could honestly add or how to frame honestly.';
+
+    let taskBlock: string;
+    if (mode === 'general') {
+      taskBlock = `You are an interview coach. The candidate is preparing for interviews in general — there is NO specific job posting or employer.
+
+Generate exactly 10 questions using their knowledge base only for personalization (stories, projects, skills). Do NOT mention a specific company, job title from a posting, or "this role" as if tied to one employer. Use types such as: Behavioral, Situational, Technical, General, Motivation.
+
+Mix:
+- 2 motivation / "tell me about yourself" / why-this-field style
+- 3 STAR behavioral questions grounded in patterns from their experience
+- 2 technical or system-design questions that fit their stack but are not tied to one JD
+- 2 situational / judgment questions
+- 1 meta question they could ask the interviewer
+
+For each question, give a 2-3 sentence hint on what a strong answer would include, AND a separate "answer" field: a first-person draft they could say aloud.
+
+${jsonShape}`;
+    } else {
+      taskBlock = `You are a senior technical interviewer. Generate exactly 10 interview questions tailored to BOTH the candidate's knowledge base AND the target job description below.
+
+Align technical and role-fit questions to the JD's responsibilities, stack, and keywords. Include behavioral questions grounded in their actual experience from the KB. Use clear "type" labels (e.g. Technical, Behavioral, Situational, Role-fit).
+
+For each question, give a 2-3 sentence hint on what a strong answer would include, AND a separate "answer" field: a first-person draft tying their KB evidence to this JD where relevant.
+
+Target job description:
+\`\`\`
+${jdTrim}
+\`\`\`
+
+${jsonShape}`;
+    }
+
+    const prompt = `${taskBlock}
 
 Candidate's KB:
 \`\`\`json
 ${kbJson}
-\`\`\`
+\`\`\``;
 
-${jdSection}`;
-
-    const model = genAI.getGenerativeModel({ model: MODEL });
+    const model = genAI.getGenerativeModel({ model: getGeminiModelId() });
     const result = await Promise.race([
       model.generateContent(prompt),
       new Promise<never>((_, reject) =>
@@ -148,9 +226,17 @@ ${jdSection}`;
     const raw = result.response.text().trim();
     const fenceMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
     const jsonStr = fenceMatch ? fenceMatch[1].trim() : raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1);
-    const parsed = JSON.parse(jsonStr) as { questions: { type: string; question: string; hint: string }[] };
+    const parsed = JSON.parse(jsonStr) as { questions?: unknown };
+    const questions = normalizeStoredQuestions(parsed.questions);
+    if (!questions.length) {
+      res.status(502).json({ error: 'Could not parse interview questions. Try again.' });
+      return;
+    }
 
-    res.json({ questions: parsed.questions ?? [] });
+    const fp = mode === 'role' ? jdFingerprint(jdTrim) : null;
+    await saveInterviewPrep(uid, mode, questions, fp);
+
+    res.json({ questions });
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Unknown error';
     if (msg === 'TIMEOUT') {

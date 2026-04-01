@@ -1,7 +1,8 @@
 import { Router, Response, Request } from 'express';
 import { verifyToken, AuthRequest } from '../middleware/verifyToken';
 import { db } from '../lib/firebase';
-import { getKB, updateKBSection, rollbackKB, getKBHistory } from '../lib/kbService';
+import { getKB, updateKBSection, rollbackKB, getKBHistory, writeKB } from '../lib/kbService';
+import { sanitizeGeminiKbResponse, kbHasMinimumContent } from '../lib/kbSanitize';
 import { buildPublicProfile } from '../lib/publicProfileBuilder';
 import {
   isValidUsername,
@@ -111,6 +112,53 @@ router.get('/kb', verifyToken, async (req: AuthRequest, res: Response): Promise<
     res.json(kb);
   } catch (error) {
     console.error('[GET /profile/kb]', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * POST /api/profile/kb/import
+ * Body: { json: string } — raw JSON from an external LLM (or { payload: object }).
+ * Strips userId, lastUpdated, version if present; sanitizes and replaces KB.
+ */
+router.post('/kb/import', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { json, payload } = req.body as { json?: unknown; payload?: unknown };
+    let parsed: unknown;
+    if (typeof json === 'string') {
+      try {
+        parsed = JSON.parse(json.trim());
+      } catch {
+        res.status(400).json({ error: 'Invalid JSON string' });
+        return;
+      }
+    } else if (payload !== undefined && typeof payload === 'object' && payload !== null) {
+      parsed = payload;
+    } else {
+      res.status(400).json({ error: 'Send { json: "<stringified object>" } or { payload: { ... } }' });
+      return;
+    }
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      res.status(400).json({ error: 'JSON must be a single object, not an array' });
+      return;
+    }
+    const record = { ...(parsed as Record<string, unknown>) };
+    delete record.userId;
+    delete record.lastUpdated;
+    delete record.version;
+
+    const patch = sanitizeGeminiKbResponse(record);
+    if (!kbHasMinimumContent(patch)) {
+      res.status(422).json({
+        error:
+          'After validation, not enough profile data remained. Include at least a name, or education, experience, projects, or skills.',
+      });
+      return;
+    }
+    const kb = await writeKB(req.uid!, patch, 'Imported from pasted JSON');
+    res.json({ kb });
+  } catch (error) {
+    console.error('[POST /profile/kb/import]', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -326,7 +374,18 @@ router.delete('/account', verifyToken, async (req: AuthRequest, res: Response): 
     const userRef = db.collection('users').doc(uid);
 
     // Delete sub-collections
-    const collections = ['knowledgeBase', 'chatHistory', 'session', 'notifications'];
+    const collections = [
+      'knowledgeBase',
+      'chatHistory',
+      'session',
+      'notifications',
+      'jobProfile',
+      'applications',
+      'interviewSessions',
+      'jobSearchCache',
+      'jobWeakSpots',
+      'meta',
+    ];
     for (const col of collections) {
       const snap = await userRef.collection(col).get();
       if (snap.size) {

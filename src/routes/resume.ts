@@ -1,11 +1,14 @@
 import { Router, Response } from 'express';
 import multer from 'multer';
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const pdfParse = require('pdf-parse') as (buf: Buffer) => Promise<{ text: string; numpages: number }>;
 import { verifyToken, AuthRequest } from '../middleware/verifyToken';
+import { extractTextFromPdf } from '../lib/pdfExtract';
 import { geminiRateLimit } from '../middleware/rateLimiter';
 import { storage } from '../lib/firebase';
-import { parseResumeWithGemini } from '../lib/gemini';
+import {
+  parseResumeWithGemini,
+  parseResumeWithGeminiFromPdf,
+  getGeminiFetchStatus,
+} from '../lib/gemini';
 import { writeKB, getKB } from '../lib/kbService';
 import { saveSession, getSession } from '../lib/sessionService';
 import {
@@ -16,6 +19,11 @@ import {
 } from '../lib/resumeGenService';
 import { renderResumePdf, renderCoverLetterPdf, ResumeTemplateId } from '../lib/pdfService';
 import { RefinedResume } from '../types/resume';
+import type { GeminiKBResponse } from '../types/kb';
+import { kbHasMinimumContent } from '../lib/kbSanitize';
+
+const GEMINI_QUOTA_ERROR =
+  'Google Gemini quota or rate limit was hit for your API key (free tier may be exhausted for this model). Wait a minute and try again, set GEMINI_MODEL to another supported model in apps/api/.env, or enable billing and higher limits in Google AI Studio: https://ai.google.dev/gemini-api/docs/rate-limits';
 
 const router = Router();
 
@@ -47,31 +55,84 @@ router.post(
     } catch (err) {
       console.error('[resume/upload] Storage upload failed:', err);
     }
-    let resumeText: string;
-    try {
-      const parsed = await pdfParse(fileBuffer);
-      resumeText = parsed.text;
-      if (!resumeText || resumeText.trim().length < 50) {
-        res.status(422).json({
-          error: 'Could not parse resume. Please try again or use a cleaner PDF.',
-        });
-        return;
-      }
-    } catch {
-      res.status(422).json({
-        error: 'Could not parse resume. Please try again or use a cleaner PDF.',
+    if (!process.env.GEMINI_API_KEY?.trim()) {
+      res.status(503).json({
+        error: 'Resume parsing is not configured on the server (missing GEMINI_API_KEY).',
       });
       return;
     }
-    let geminiPatch;
+
+    let resumeText = '';
+    let extractFailed = false;
     try {
-      geminiPatch = await parseResumeWithGemini(resumeText);
-    } catch (err) {
-      const message = err instanceof SyntaxError
-        ? 'Could not parse resume. Please try again or use a cleaner PDF.'
-        : 'AI parsing failed. Please try again.';
-      console.error('[resume/upload] Gemini failed:', err);
+      const parsed = await extractTextFromPdf(fileBuffer);
+      resumeText = (parsed.text ?? '').trim();
+    } catch (e) {
+      extractFailed = true;
+      console.warn('[resume/upload] PDF text extract failed; will try reading the PDF with AI:', e);
+    }
+
+    let geminiPatch: GeminiKBResponse | undefined;
+    let textParseError: unknown;
+
+    if (resumeText.length >= 40) {
+      try {
+        geminiPatch = await parseResumeWithGemini(resumeText);
+      } catch (err) {
+        textParseError = err;
+        console.warn('[resume/upload] Gemini text parse failed, will try PDF if needed:', err);
+        if (getGeminiFetchStatus(err) === 429) {
+          res.status(429).json({ error: GEMINI_QUOTA_ERROR });
+          return;
+        }
+      }
+    } else {
+      console.warn(
+        `[resume/upload] Sparse or missing PDF text (${resumeText.length} chars); skipping text-only parse`,
+      );
+    }
+
+    if (!geminiPatch || !kbHasMinimumContent(geminiPatch)) {
+      try {
+        const fromPdf = await parseResumeWithGeminiFromPdf(fileBuffer);
+        if (kbHasMinimumContent(fromPdf)) {
+          geminiPatch = fromPdf;
+        } else if (!geminiPatch) {
+          geminiPatch = fromPdf;
+        }
+      } catch (pdfErr) {
+        console.warn('[resume/upload] Gemini PDF parse failed:', pdfErr);
+        if (getGeminiFetchStatus(pdfErr) === 429) {
+          res.status(429).json({ error: GEMINI_QUOTA_ERROR });
+          return;
+        }
+      }
+    }
+
+    if (!geminiPatch) {
+      const err = textParseError;
+      const sparse = resumeText.length < 40;
+      let message: string;
+      if (sparse || extractFailed) {
+        message =
+          err instanceof SyntaxError
+            ? 'AI could not parse this file. Try exporting a text-based PDF from Word or Google Docs, or a smaller scan.'
+            : 'Could not read this PDF well enough (little or no extractable text, and visual parsing failed). Try a text-based export, a smaller file, or add your details in chat.';
+      } else {
+        message =
+          err instanceof SyntaxError
+            ? 'AI returned invalid data. Try again, or shorten/export a simpler PDF from Word.'
+            : 'AI parsing failed. Try again in a moment, or use a text-based PDF export.';
+      }
+      console.error('[resume/upload] Gemini failed (text + PDF):', err);
       res.status(422).json({ error: message });
+      return;
+    }
+    if (!kbHasMinimumContent(geminiPatch)) {
+      res.status(422).json({
+        error:
+          'We could not extract enough structure from this PDF. Try a one-column export from Word/Docs, or add your details in chat (“My name is…”, “I studied at…”).',
+      });
       return;
     }
     try {
