@@ -57,8 +57,9 @@ app.use((_req, res) => {
 
 async function start(): Promise<void> {
   await warmGeminiModelSelection();
-  app.listen(PORT, () => {
-    console.log(`ResumeForge API running on http://localhost:${PORT}`);
+  const port = Number(PORT) || 4000;
+  app.listen(port, '0.0.0.0', () => {
+    console.log(`ResumeForge API running on http://0.0.0.0:${port}`);
   });
 }
 

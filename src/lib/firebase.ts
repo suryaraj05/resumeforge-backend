@@ -56,7 +56,9 @@ function getAdminCredential(): admin.ServiceAccount {
   return { projectId, clientEmail, privateKey };
 }
 
-if (!admin.apps.length) {
+/** Lazy init so the process can boot (e.g. /health) before Firebase env is set in deploy. */
+function ensureApp(): void {
+  if (admin.apps.length > 0) return;
   const cred = getAdminCredential();
   admin.initializeApp({
     credential: admin.credential.cert(cred),
@@ -64,16 +66,42 @@ if (!admin.apps.length) {
   });
 }
 
-const firestore = admin.firestore();
-// Job listings include optional fields (salary, applyUrl, …) that are often undefined;
-// Firestore rejects undefined unless stripped.
-try {
-  firestore.settings({ ignoreUndefinedProperties: true });
-} catch {
-  /* already applied (e.g. dev hot reload) */
+type AdminFirestore = ReturnType<typeof admin.firestore>;
+
+let firestoreInstance: AdminFirestore | null = null;
+
+function getFirestore(): AdminFirestore {
+  ensureApp();
+  if (!firestoreInstance) {
+    firestoreInstance = admin.firestore();
+    // Job listings include optional fields (salary, applyUrl, …) that are often undefined;
+    // Firestore rejects undefined unless stripped.
+    try {
+      firestoreInstance.settings({ ignoreUndefinedProperties: true });
+    } catch {
+      /* already applied (e.g. dev hot reload) */
+    }
+  }
+  return firestoreInstance;
 }
 
-export const db = firestore;
-export const auth = admin.auth();
-export const storage = admin.storage();
+function adminProxy<T extends object>(factory: () => T): T {
+  return new Proxy({} as T, {
+    get(_target, prop) {
+      const real = factory();
+      const value = (real as Record<string | symbol, unknown>)[prop];
+      return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(real) : value;
+    },
+  });
+}
+
+export const db = adminProxy(() => getFirestore()) as AdminFirestore;
+export const auth = adminProxy(() => {
+  ensureApp();
+  return admin.auth();
+}) as admin.auth.Auth;
+export const storage = adminProxy(() => {
+  ensureApp();
+  return admin.storage();
+}) as admin.storage.Storage;
 export default admin;
