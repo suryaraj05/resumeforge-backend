@@ -1,11 +1,9 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
 import { db } from './firebase';
 import { getKB } from './kbService';
 import { getGeminiModelId } from './geminiModels';
+import { hasGeminiApiKeys, nextGoogleGenerativeAI } from './geminiKeys';
 import type { JobSearchProfile } from '../types/jobs';
 import type { KnowledgeBase } from '../types/kb';
-
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
 
 function profileRef(userId: string) {
   return db.collection('users').doc(userId).collection('jobProfile').doc('current');
@@ -45,7 +43,7 @@ function defaultProfile(kb: KnowledgeBase): JobSearchProfile {
 }
 
 async function inferWithGemini(kb: KnowledgeBase): Promise<JobSearchProfile> {
-  const model = genAI.getGenerativeModel({
+  const model = nextGoogleGenerativeAI().getGenerativeModel({
     model: getGeminiModelId(),
     generationConfig: { responseMimeType: 'application/json' },
   });
@@ -108,7 +106,7 @@ export async function getOrInferJobProfile(
     return { profile: stored, refreshed: false };
   }
 
-  if (!process.env.GEMINI_API_KEY?.trim()) {
+  if (!hasGeminiApiKeys()) {
     const profile = defaultProfile(kb);
     await saveJobProfile(userId, profile);
     return { profile, refreshed: true };

@@ -1,19 +1,18 @@
-import { GoogleGenerativeAI, type GenerativeModel } from '@google/generative-ai';
+import type { GenerativeModel } from '@google/generative-ai';
 import dotenv from 'dotenv';
 import { GeminiKBResponse } from '../types/kb';
 import { sanitizeGeminiKbResponse } from './kbSanitize';
 import { getGeminiModelId } from './geminiModels';
+import { nextGoogleGenerativeAI } from './geminiKeys';
 
 dotenv.config();
-
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
 
 type ContentPart =
   | { text: string }
   | { inlineData: { mimeType: string; data: string } };
 
 function getModel(jsonMode: boolean): GenerativeModel {
-  return genAI.getGenerativeModel({
+  return nextGoogleGenerativeAI().getGenerativeModel({
     model: getGeminiModelId(),
     ...(jsonMode
       ? { generationConfig: { responseMimeType: 'application/json' as const } }

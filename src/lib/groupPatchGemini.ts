@@ -1,8 +1,6 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
 import { getGeminiModelId } from './geminiModels';
+import { nextGoogleGenerativeAI } from './geminiKeys';
 import { KnowledgeBase } from '../types/kb';
-
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
 
 const TIMEOUT_MS = 45_000;
 
@@ -37,7 +35,7 @@ export async function generateGroupMemberPatch(
   currentSectionJson: unknown,
   updateDescription: string
 ): Promise<GroupPatchGeminiResult> {
-  const model = genAI.getGenerativeModel({ model: getGeminiModelId() });
+  const model = nextGoogleGenerativeAI().getGenerativeModel({ model: getGeminiModelId() });
   const prompt = `${SYSTEM}
 
 User's current ${section} KB:
@@ -87,7 +85,7 @@ export async function runPeerComparison(
   groupAverageSkills: string[];
   recommendation: string;
 }> {
-  const model = genAI.getGenerativeModel({ model: getGeminiModelId() });
+  const model = nextGoogleGenerativeAI().getGenerativeModel({ model: getGeminiModelId() });
   const system = `You are a career advisor doing an anonymous skill gap analysis. Given one user's KB and a list of anonymized peer KBs (no names), compare the user's skills, projects, and experience to the group. Return ONLY JSON: { "userStrengths": [string], "userGaps": [string], "groupAverageSkills": [string], "recommendation": string }. Do not add explanation or markdown.`;
 
   const prompt = `${system}

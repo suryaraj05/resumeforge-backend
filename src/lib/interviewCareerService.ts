@@ -1,8 +1,8 @@
 import { v4 as uuidv4 } from 'uuid';
-import { GoogleGenerativeAI } from '@google/generative-ai';
 import { db } from './firebase';
 import { getKB } from './kbService';
 import { getGeminiModelId } from './geminiModels';
+import { hasGeminiApiKeys, nextGoogleGenerativeAI } from './geminiKeys';
 import type {
   CompanyIntel,
   InterviewAnswerRecord,
@@ -12,8 +12,6 @@ import type {
   InterviewSessionDoc,
   ReadinessReport,
 } from '../types/jobs';
-
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
 
 function extractJSON(raw: string): string {
   const fenceMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
@@ -29,7 +27,7 @@ function sessionsCol(userId: string) {
 }
 
 async function generateCompanyIntel(company: string, role: string, jdText: string): Promise<CompanyIntel> {
-  const model = genAI.getGenerativeModel({
+  const model = nextGoogleGenerativeAI().getGenerativeModel({
     model: getGeminiModelId(),
     generationConfig: { responseMimeType: 'application/json' },
   });
@@ -54,7 +52,7 @@ async function generateQuestions(
   jdText: string,
   kbJson: string
 ): Promise<InterviewQuestionItem[]> {
-  const model = genAI.getGenerativeModel({
+  const model = nextGoogleGenerativeAI().getGenerativeModel({
     model: getGeminiModelId(),
     generationConfig: { responseMimeType: 'application/json' },
   });
@@ -153,7 +151,7 @@ export async function startInterviewSession(params: {
   let companyIntel: CompanyIntel | null = null;
   let questions: InterviewQuestionItem[] = [];
 
-  if (process.env.GEMINI_API_KEY?.trim()) {
+  if (hasGeminiApiKeys()) {
     try {
       [companyIntel, questions] = await Promise.all([
         generateCompanyIntel(params.company, params.role, params.jdText),
@@ -230,9 +228,9 @@ export async function evaluateAnswer(params: {
     askedFollowUp: false,
   };
 
-  if (process.env.GEMINI_API_KEY?.trim()) {
+  if (hasGeminiApiKeys()) {
     try {
-      const model = genAI.getGenerativeModel({
+      const model = nextGoogleGenerativeAI().getGenerativeModel({
         model: getGeminiModelId(),
         generationConfig: { responseMimeType: 'application/json' },
       });

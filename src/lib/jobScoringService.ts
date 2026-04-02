@@ -1,10 +1,8 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
 import type { Timestamp } from 'firebase-admin/firestore';
 import { db } from './firebase';
 import { getGeminiModelId } from './geminiModels';
+import { hasGeminiApiKeys, nextGoogleGenerativeAI } from './geminiKeys';
 import type { JobSearchProfile, JobScoreResult, NormalizedJob } from '../types/jobs';
-
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
 
 const CACHE_COLLECTION = 'jobScoreCache';
 const TTL_MS = 24 * 60 * 60 * 1000;
@@ -100,7 +98,7 @@ async function scoreBatchWithGemini(
   profile: JobSearchProfile,
   jobs: NormalizedJob[]
 ): Promise<JobScoreResult[]> {
-  const model = genAI.getGenerativeModel({
+  const model = nextGoogleGenerativeAI().getGenerativeModel({
     model: getGeminiModelId(),
     generationConfig: { responseMimeType: 'application/json' },
   });
@@ -172,12 +170,12 @@ export async function scoreJobsForUser(
     };
   }
 
-  if (!process.env.GEMINI_API_KEY?.trim()) {
+  if (!hasGeminiApiKeys()) {
     const naive = needNew.map((j) => ({
       job: j,
       score: normalizeScore({
         fitScore: 55,
-        whyThisRole: 'Configure GEMINI_API_KEY for personalized fit scores.',
+        whyThisRole: 'Configure GEMINI_API_KEYS (or GEMINI_API_KEY) for personalized fit scores.',
         matchedSkills: profile.keySkills.slice(0, 2),
         missingSkills: [],
       }),

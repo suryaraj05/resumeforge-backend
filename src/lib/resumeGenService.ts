@@ -1,13 +1,11 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
 import { getGeminiModelId } from './geminiModels';
+import { nextGoogleGenerativeAI } from './geminiKeys';
 import { KnowledgeBase } from '../types/kb';
 import {
   RefinedResume,
   ATSScoreResult,
   JobFitResult,
 } from '../types/resume';
-
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
 
 const LONG_MS = 60_000;
 /** Long-form resume JSON can be large; allow a slower, higher-token generation. */
@@ -33,13 +31,13 @@ function extractJSON(raw: string): string {
 }
 
 async function geminiText(prompt: string, ms = LONG_MS): Promise<string> {
-  const model = genAI.getGenerativeModel({ model: getGeminiModelId() });
+  const model = nextGoogleGenerativeAI().getGenerativeModel({ model: getGeminiModelId() });
   const result = await withTimeout(model.generateContent(prompt), ms);
   return result.response.text().trim();
 }
 
 async function geminiTextCurator(prompt: string): Promise<string> {
-  const model = genAI.getGenerativeModel({
+  const model = nextGoogleGenerativeAI().getGenerativeModel({
     model: getGeminiModelId(),
     generationConfig: {
       maxOutputTokens: CURATOR_MAX_OUTPUT_TOKENS,

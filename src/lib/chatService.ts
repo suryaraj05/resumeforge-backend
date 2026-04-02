@@ -1,4 +1,3 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
 import { v4 as uuidv4 } from 'uuid';
 import { getGeminiFetchStatus } from './gemini';
 import { db } from './firebase';
@@ -31,6 +30,7 @@ import {
 } from '../types/chat';
 
 import { getGeminiModelId } from './geminiModels';
+import { nextGoogleGenerativeAI } from './geminiKeys';
 import { saveInterviewPrep, normalizeStoredQuestions } from './interviewPrepStorage';
 import { createOrUpdateApplicationFromResumeSession } from './applicationsService';
 import {
@@ -40,8 +40,6 @@ import {
   handleInterviewTrainIntent,
   handleWeakSpotsIntent,
 } from './jobChatHandlers';
-
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
 
 const TIMEOUT_MS = 15000;
 const LONG_TIMEOUT_MS = 130_000;
@@ -78,7 +76,7 @@ function extractJSON(raw: string): string {
 // ─── Gemini helper ────────────────────────────────────────────────────────────
 
 async function geminiText(prompt: string): Promise<string> {
-  const model = genAI.getGenerativeModel({ model: getGeminiModelId() });
+  const model = nextGoogleGenerativeAI().getGenerativeModel({ model: getGeminiModelId() });
   const result = await withTimeout(model.generateContent(prompt));
   return result.response.text().trim();
 }
@@ -237,7 +235,7 @@ async function routeIntent(
       intent: 'router_failed',
       params: {},
       reply:
-        "I couldn't reach the AI (routing step). Check GEMINI_API_KEY, network, and API logs. For profiles without chat AI, use Settings → Import KB from JSON.",
+        "I couldn't reach the AI (routing step). Check GEMINI_API_KEYS / GEMINI_API_KEY, network, and API logs. For profiles without chat AI, use Settings → Import KB from JSON.",
     };
   }
 }

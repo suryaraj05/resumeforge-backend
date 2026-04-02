@@ -2,9 +2,10 @@
  * Gemini model discovery: ordered candidates, ListModels API merge, probe via generateContent.
  *
  * Run probe (from apps/api):  npm run gemini:probe
- * Prints which model IDs work with your GEMINI_API_KEY and suggests GEMINI_MODEL=...
+ * Prints which model IDs work with your Gemini API key and suggests GEMINI_MODEL=...
  */
 import dotenv from 'dotenv';
+import { getFirstGeminiApiKey } from './geminiKeys';
 
 const API_ROOT = 'https://generativelanguage.googleapis.com/v1beta';
 
@@ -162,9 +163,11 @@ export async function pickFirstWorkingGeminiModel(
 
 /** Call once at API startup: sets process.env.GEMINI_MODEL to the first working id. */
 export async function warmGeminiModelSelection(): Promise<void> {
-  const key = process.env.GEMINI_API_KEY?.trim();
+  const key = getFirstGeminiApiKey()?.trim();
   if (!key) {
-    console.warn('[geminiModels] GEMINI_API_KEY not set — AI routes will fail until you add it.');
+    console.warn(
+      '[geminiModels] No Gemini API keys — set GEMINI_API_KEYS (or GEMINI_API_KEY) in .env.',
+    );
     return;
   }
   const explicit = process.env.GEMINI_MODEL?.trim();
@@ -201,9 +204,9 @@ export async function runFullGeminiProbe(apiKey: string, prefer?: string): Promi
 
 export async function printGeminiModelProbeReport(): Promise<void> {
   dotenv.config();
-  const key = process.env.GEMINI_API_KEY?.trim();
+  const key = getFirstGeminiApiKey()?.trim();
   if (!key) {
-    console.error('Set GEMINI_API_KEY in apps/api/.env first.');
+    console.error('Set GEMINI_API_KEYS or GEMINI_API_KEY in apps/api/.env first.');
     process.exitCode = 1;
     return;
   }

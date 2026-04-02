@@ -1,9 +1,7 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
 import { db } from './firebase';
 import { getGeminiModelId } from './geminiModels';
+import { hasGeminiApiKeys, nextGoogleGenerativeAI } from './geminiKeys';
 import type { JobScoreResult, WeakSpotReport } from '../types/jobs';
-
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
 
 function extractJSON(raw: string): string {
   const fenceMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
@@ -62,13 +60,13 @@ export async function buildWeakSpotReportFromScores(
     fromJobCount: jobCount,
   };
 
-  if (!process.env.GEMINI_API_KEY?.trim()) {
+  if (!hasGeminiApiKeys()) {
     await weakSpotRef(userId).set(report);
     return report;
   }
 
   try {
-    const model = genAI.getGenerativeModel({
+    const model = nextGoogleGenerativeAI().getGenerativeModel({
       model: getGeminiModelId(),
       generationConfig: { responseMimeType: 'application/json' },
     });

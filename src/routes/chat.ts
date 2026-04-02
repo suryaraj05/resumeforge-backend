@@ -6,8 +6,8 @@ import { processMessage, getChatHistory, saveChatMessages } from '../lib/chatSer
 import { getKB } from '../lib/kbService';
 import { db } from '../lib/firebase';
 import { ChatContinuation, StoredChatMessage } from '../types/chat';
-import { GoogleGenerativeAI } from '@google/generative-ai';
 import { getGeminiModelId } from '../lib/geminiModels';
+import { nextGoogleGenerativeAI } from '../lib/geminiKeys';
 import { getSession } from '../lib/sessionService';
 import {
   jdFingerprint,
@@ -15,8 +15,6 @@ import {
   getAllInterviewPrep,
   normalizeStoredQuestions,
 } from '../lib/interviewPrepStorage';
-
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
 
 const router = Router();
 
@@ -215,7 +213,7 @@ Candidate's KB:
 ${kbJson}
 \`\`\``;
 
-    const model = genAI.getGenerativeModel({ model: getGeminiModelId() });
+    const model = nextGoogleGenerativeAI().getGenerativeModel({ model: getGeminiModelId() });
     const result = await Promise.race([
       model.generateContent(prompt),
       new Promise<never>((_, reject) =>

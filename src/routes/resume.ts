@@ -21,6 +21,7 @@ import { renderResumePdf, renderCoverLetterPdf, ResumeTemplateId } from '../lib/
 import { RefinedResume } from '../types/resume';
 import type { GeminiKBResponse } from '../types/kb';
 import { kbHasMinimumContent } from '../lib/kbSanitize';
+import { hasGeminiApiKeys } from '../lib/geminiKeys';
 
 const GEMINI_QUOTA_ERROR =
   'Google Gemini quota or rate limit was hit for your API key (free tier may be exhausted for this model). Wait a minute and try again, set GEMINI_MODEL to another supported model in apps/api/.env, or enable billing and higher limits in Google AI Studio: https://ai.google.dev/gemini-api/docs/rate-limits';
@@ -55,9 +56,10 @@ router.post(
     } catch (err) {
       console.error('[resume/upload] Storage upload failed:', err);
     }
-    if (!process.env.GEMINI_API_KEY?.trim()) {
+    if (!hasGeminiApiKeys()) {
       res.status(503).json({
-        error: 'Resume parsing is not configured on the server (missing GEMINI_API_KEY).',
+        error:
+          'Resume parsing is not configured on the server (missing GEMINI_API_KEYS or GEMINI_API_KEY).',
       });
       return;
     }
