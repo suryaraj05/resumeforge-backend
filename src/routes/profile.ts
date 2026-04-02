@@ -3,6 +3,7 @@ import { verifyToken, AuthRequest } from '../middleware/verifyToken';
 import { db } from '../lib/firebase';
 import { getKB, updateKBSection, rollbackKB, getKBHistory, writeKB } from '../lib/kbService';
 import { sanitizeGeminiKbResponse, kbHasMinimumContent } from '../lib/kbSanitize';
+import { normalizeKbSection } from '../lib/kbSectionUtils';
 import { buildPublicProfile } from '../lib/publicProfileBuilder';
 import {
   isValidUsername,
@@ -170,20 +171,21 @@ router.post('/kb/import', verifyToken, async (req: AuthRequest, res: Response): 
  */
 router.post('/kb/update', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const { section, patch, summary } = req.body as {
+    const { section: rawSection, patch, summary } = req.body as {
       section: string;
       patch: unknown;
       summary?: string;
     };
 
-    if (!section || patch === undefined) {
-      res.status(400).json({ error: 'section and patch are required' });
+    const section = normalizeKbSection(typeof rawSection === 'string' ? rawSection : '');
+    if (!section) {
+      res.status(400).json({
+        error: `Invalid or missing section. Use one of: personal, education, experience, projects, skills, certifications, achievements, publications.`,
+      });
       return;
     }
-
-    const validSections = ['personal', 'education', 'experience', 'projects', 'skills', 'certifications', 'achievements', 'publications'];
-    if (!validSections.includes(section)) {
-      res.status(400).json({ error: `Invalid section: ${section}` });
+    if (patch === undefined) {
+      res.status(400).json({ error: 'section and patch are required' });
       return;
     }
 

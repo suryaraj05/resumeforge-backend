@@ -80,6 +80,19 @@ router.post('/message', verifyToken, geminiRateLimit, async (req: AuthRequest, r
       content: response.reply,
       intent: response.intent,
       timestamp: new Date(Date.now() + 1).toISOString(),
+      ...(response.intent === 'update_kb' &&
+      response.data &&
+      response.data.section &&
+      response.data.patch !== undefined
+        ? {
+            data: {
+              section: response.data.section,
+              patch: response.data.patch,
+              patchSummary: response.data.patchSummary,
+              currentSection: response.data.currentSection,
+            },
+          }
+        : {}),
     };
 
     appendSessionMessages(uid, sid, [userMsg, botMsg]).catch((err) =>

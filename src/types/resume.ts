@@ -54,6 +54,13 @@ export interface RefinedAchievement {
   date?: string;
 }
 
+/** Snapshot diff when regenerating tailored resume vs previous version. */
+export interface ResumeDiffRow {
+  area: string;
+  before: string;
+  after: string;
+}
+
 export interface RefinedResume {
   targetRole?: string;
   summary?: string;

@@ -1,4 +1,9 @@
-import type { RefinedResume, ATSScoreResult, JobFitResult } from './resume';
+import type {
+  RefinedResume,
+  ATSScoreResult,
+  JobFitResult,
+  ResumeDiffRow,
+} from './resume';
 import type { PeerComparisonResult } from './groups';
 import type { WeakSpotReport } from './jobs';
 
@@ -28,12 +33,24 @@ export type ChatIntent =
   /** Internal: intent routing failed; reply is shown as chitchat without a second LLM call */
   | 'router_failed';
 
+/**
+ * Persisted on bot messages so KB confirm works after reload (bounded: update_kb only).
+ */
+export interface StoredChatMessageData {
+  section?: string;
+  patch?: unknown;
+  patchSummary?: string;
+  currentSection?: unknown;
+}
+
 export interface StoredChatMessage {
   id: string;
   role: ChatRole;
   content: string;
   intent?: ChatIntent;
   timestamp: string;
+  /** Present for intents that need client replay (e.g. update_kb). */
+  data?: StoredChatMessageData;
 }
 
 /** Structured follow-up from the client (skips intent routing). */
@@ -85,6 +102,8 @@ export interface ChatResponseData {
   // Phase 4 — resume / ATS / cover letter / job fit
   refinedResume?: RefinedResume;
   reasoning?: RefinedResume['reasoning'];
+  /** When regenerating: what changed vs previous tailored resume in session */
+  resumeDiff?: ResumeDiffRow[];
   atsScore?: ATSScoreResult;
   /** generate_resume: JD too short — client should prompt for full JD */
   awaitingJobDescription?: boolean;

@@ -1,5 +1,7 @@
 import { db } from './firebase';
 import { KnowledgeBase, GeminiKBResponse } from '../types/kb';
+import { sanitizeGeminiKbResponse } from './kbSanitize';
+import { KB_ARRAY_SECTIONS, type KBSectionName } from './kbSectionUtils';
 
 const MAX_HISTORY_VERSIONS = 20;
 
@@ -7,6 +9,53 @@ const VALID_SECTIONS = new Set([
   'personal', 'education', 'experience', 'projects',
   'skills', 'certifications', 'achievements', 'publications',
 ]);
+
+function itemId(item: unknown): string | undefined {
+  if (typeof item !== 'object' || item === null) return undefined;
+  const id = (item as Record<string, unknown>).id;
+  return typeof id === 'string' && id.trim() ? id : undefined;
+}
+
+/** Patch updates rows by id; existing rows omitted from the patch are kept. */
+function mergeArraySection(current: unknown, patch: unknown): unknown {
+  const oldArr = Array.isArray(current) ? [...current] : [];
+  const newArr = Array.isArray(patch) ? patch : [];
+  const indexById = new Map<string, number>();
+  oldArr.forEach((item, i) => {
+    const id = itemId(item);
+    if (id) indexById.set(id, i);
+  });
+  const out = [...oldArr];
+  for (const item of newArr) {
+    const id = itemId(item);
+    if (id) {
+      const idx = indexById.get(id);
+      if (idx !== undefined) {
+        out[idx] = item;
+      } else {
+        out.push(item);
+        indexById.set(id, out.length - 1);
+      }
+    } else {
+      out.push(item);
+    }
+  }
+  return out;
+}
+
+function mergeObjectSection(current: unknown, patch: unknown): unknown {
+  if (typeof patch !== 'object' || patch === null || Array.isArray(patch)) return patch;
+  const oldObj =
+    typeof current === 'object' && current !== null && !Array.isArray(current)
+      ? (current as Record<string, unknown>)
+      : {};
+  return { ...oldObj, ...(patch as Record<string, unknown>) };
+}
+
+function stripMeta(kb: KnowledgeBase): Record<string, unknown> {
+  const { userId: _u, lastUpdated: _l, version: _v, ...rest } = kb;
+  return rest as Record<string, unknown>;
+}
 
 export async function getKB(userId: string): Promise<KnowledgeBase | null> {
   const doc = await db
@@ -47,12 +96,18 @@ export async function updateKBSection(
   }
 
   const current = await getKB(userId);
-  const merged: GeminiKBResponse = {
-    ...(current ?? {}),
-    [section]: patch,
-  };
+  const currentSection = current ? (current as unknown as Record<string, unknown>)[section] : undefined;
+  let mergedSection: unknown = patch;
+  if (KB_ARRAY_SECTIONS.has(section as KBSectionName)) {
+    mergedSection = mergeArraySection(currentSection, patch);
+  } else if (section === 'personal' || section === 'skills') {
+    mergedSection = mergeObjectSection(currentSection, patch);
+  }
+  const base = current ? stripMeta(current) : {};
+  const mergedRaw = { ...base, [section]: mergedSection };
+  const sanitized = sanitizeGeminiKbResponse(mergedRaw as Record<string, unknown>);
 
-  return _writeKBInternal(userId, merged, changeSummary);
+  return _writeKBInternal(userId, sanitized, changeSummary);
 }
 
 /**

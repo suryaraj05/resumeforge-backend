@@ -40,6 +40,8 @@ import {
   handleInterviewTrainIntent,
   handleWeakSpotsIntent,
 } from './jobChatHandlers';
+import { normalizeKbSection } from './kbSectionUtils';
+import { computeResumeDiffSnapshot } from './resumeDiffUtils';
 
 const TIMEOUT_MS = 15000;
 const LONG_TIMEOUT_MS = 130_000;
@@ -277,13 +279,15 @@ async function handleUpdateKB(
   description: string,
   kb: KnowledgeBase
 ): Promise<KBPatchResult> {
-  const validSections = ['personal', 'education', 'experience', 'projects', 'skills', 'certifications', 'achievements', 'publications'];
-  const safeSection = validSections.includes(section) ? section : 'personal';
-  const currentSection = (kb as unknown as Record<string, unknown>)[safeSection] ?? null;
+  const currentSection = (kb as unknown as Record<string, unknown>)[section] ?? null;
 
-  const prompt = `You are a resume knowledge base updater. You will be given a specific section of a user's knowledge base as JSON and a natural language description of what the user wants to change. Return ONLY a JSON object with two keys: "patch" (the full updated section JSON) and "summary" (a 1-2 sentence human-readable description of what changed). Do not add explanation or markdown.
+  const prompt = `You are a resume knowledge base updater. You will be given a specific section of a user's knowledge base as JSON and a natural language description of what the user wants to change. Return ONLY a JSON object with two keys: "patch" (the updated section JSON) and "summary" (a 1-2 sentence human-readable description of what changed). Do not add explanation or markdown.
 
-Current KB section (${safeSection}):
+Rules for the patch:
+- For array sections (experience, education, projects, etc.), keep each existing item's "id" unchanged when editing that item; only create new ids for genuinely new rows. You may omit unchanged rows from the patch — the server merges by id and keeps omitted rows.
+- For personal/skills objects, include only fields that change or new fields.
+
+Current KB section (${section}):
 ${JSON.stringify(currentSection, null, 2)}
 
 User wants to:
@@ -641,7 +645,7 @@ export async function processMessage(
         };
 
       case 'update_kb': {
-        const section = params.section || 'personal';
+        const section = normalizeKbSection(params.section) ?? 'personal';
         const description = params.description || message;
         const kb = await getKB(userId);
 
@@ -745,8 +749,13 @@ export async function processMessage(
             data: { suggestions: ['Upload my resume'] },
           };
         }
+        const prevSnap = await getSession(userId);
+        const previousResume = prevSnap?.latestResume ?? null;
         const refined = await withLongTimeout(generateRefinedResume(kbGen, jd));
         const ats = await withLongTimeout(scoreATS(jd, refined));
+        const resumeDiff = previousResume
+          ? computeResumeDiffSnapshot(previousResume, refined)
+          : undefined;
         await saveSession(userId, { jd, latestResume: refined, lastAts: ats });
         return {
           intent: 'generate_resume',
@@ -756,6 +765,7 @@ export async function processMessage(
             reasoning: refined.reasoning,
             atsScore: ats,
             jd,
+            resumeDiff,
             suggestions: SUGGESTIONS_MAP.generate_resume,
           },
         };
