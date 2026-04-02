@@ -2,9 +2,8 @@ import { Router, Response } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { verifyToken, AuthRequest } from '../middleware/verifyToken';
 import { geminiRateLimit } from '../middleware/rateLimiter';
-import { processMessage, getChatHistory, saveChatMessages } from '../lib/chatService';
+import { processMessage } from '../lib/chatService';
 import { getKB } from '../lib/kbService';
-import { db } from '../lib/firebase';
 import { ChatContinuation, StoredChatMessage } from '../types/chat';
 import { getGeminiModelId } from '../lib/geminiModels';
 import { nextGoogleGenerativeAI } from '../lib/geminiKeys';
@@ -15,6 +14,16 @@ import {
   getAllInterviewPrep,
   normalizeStoredQuestions,
 } from '../lib/interviewPrepStorage';
+import {
+  listChatSessions,
+  createChatSession,
+  updateChatSessionTitle,
+  deleteChatSession,
+  getSessionMessages,
+  appendSessionMessages,
+  maybeAutoTitleFromFirstMessage,
+  clearAllChatData,
+} from '../lib/chatSessionService';
 
 const router = Router();
 
@@ -23,10 +32,11 @@ const router = Router();
  * Accepts { message, history }. Routes intent via Gemini. Returns { intent, reply, data }.
  */
 router.post('/message', verifyToken, geminiRateLimit, async (req: AuthRequest, res: Response): Promise<void> => {
-  const { message, history = [], continuation } = req.body as {
+  const { message, history = [], continuation, sessionId } = req.body as {
     message?: string;
     history: StoredChatMessage[];
     continuation?: ChatContinuation;
+    sessionId?: string;
   };
 
   const msg =
@@ -43,6 +53,11 @@ router.post('/message', verifyToken, geminiRateLimit, async (req: AuthRequest, r
   }
 
   const uid = req.uid!;
+  const sid = typeof sessionId === 'string' ? sessionId.trim() : '';
+  if (!sid) {
+    res.status(400).json({ error: 'sessionId is required' });
+    return;
+  }
 
   try {
     const response = await processMessage(
@@ -67,10 +82,14 @@ router.post('/message', verifyToken, geminiRateLimit, async (req: AuthRequest, r
       timestamp: new Date(Date.now() + 1).toISOString(),
     };
 
-    // Save to Firestore async (non-blocking)
-    saveChatMessages(uid, [userMsg, botMsg]).catch((err) =>
+    appendSessionMessages(uid, sid, [userMsg, botMsg]).catch((err) =>
       console.error('[chat/message] Firestore save failed:', err)
     );
+    if (msg.trim()) {
+      maybeAutoTitleFromFirstMessage(uid, sid, msg).catch((err) =>
+        console.error('[chat/message] auto-title failed:', err)
+      );
+    }
 
     res.json(response);
   } catch (err) {
@@ -80,14 +99,91 @@ router.post('/message', verifyToken, geminiRateLimit, async (req: AuthRequest, r
 });
 
 /**
- * GET /api/chat/history
- * Returns stored chat history (up to 100 messages).
+ * GET /api/chat/sessions
+ * Lists chat sessions (most recently updated first).
+ */
+router.get('/sessions', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const sessions = await listChatSessions(req.uid!);
+    res.json({ sessions });
+  } catch (err) {
+    console.error('[GET /chat/sessions]', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * POST /api/chat/sessions
+ * Body: { title?: string }. Creates a new empty session.
+ */
+router.post('/sessions', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const title = typeof req.body?.title === 'string' ? req.body.title : undefined;
+    const session = await createChatSession(req.uid!, title);
+    res.status(201).json({ session });
+  } catch (err) {
+    console.error('[POST /chat/sessions]', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * PATCH /api/chat/sessions/:sessionId
+ * Body: { title: string }
+ */
+router.patch('/sessions/:sessionId', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { sessionId } = req.params;
+    const title = typeof req.body?.title === 'string' ? req.body.title : '';
+    if (!title.trim()) {
+      res.status(400).json({ error: 'title is required' });
+      return;
+    }
+    await updateChatSessionTitle(req.uid!, sessionId, title);
+    res.json({ message: 'Updated' });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : '';
+    if (msg.includes('not found')) {
+      res.status(404).json({ error: 'Session not found' });
+      return;
+    }
+    console.error('[PATCH /chat/sessions/:sessionId]', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * DELETE /api/chat/sessions/:sessionId
+ */
+router.delete('/sessions/:sessionId', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    await deleteChatSession(req.uid!, req.params.sessionId);
+    res.json({ message: 'Session deleted' });
+  } catch (err) {
+    console.error('[DELETE /chat/sessions/:sessionId]', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * GET /api/chat/history?sessionId=
+ * Returns stored messages for one session (up to cap).
  */
 router.get('/history', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const history = await getChatHistory(req.uid!);
+    const sessionId = typeof req.query.sessionId === 'string' ? req.query.sessionId.trim() : '';
+    if (!sessionId) {
+      res.status(400).json({ error: 'sessionId query parameter is required' });
+      return;
+    }
+    const history = await getSessionMessages(req.uid!, sessionId);
     res.json({ history });
   } catch (err) {
+    const msg = err instanceof Error ? err.message : '';
+    if (msg.includes('not found') || msg.includes('required')) {
+      res.status(404).json({ error: 'Session not found' });
+      return;
+    }
     console.error('[GET /chat/history]', err);
     res.status(500).json({ error: 'Internal server error' });
   }
@@ -95,18 +191,12 @@ router.get('/history', verifyToken, async (req: AuthRequest, res: Response): Pro
 
 /**
  * DELETE /api/chat/history
- * Clears all chat history for the user.
+ * Clears all sessions and legacy flat history for the user.
  */
 router.delete('/history', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const uid = req.uid!;
-    const snap = await db.collection('users').doc(uid).collection('chatHistory').get();
-    if (snap.size) {
-      const batch = db.batch();
-      snap.docs.forEach((d) => batch.delete(d.ref));
-      await batch.commit();
-    }
-    res.json({ message: 'Chat history cleared' });
+    await clearAllChatData(req.uid!);
+    res.json({ message: 'All chats cleared' });
   } catch (err) {
     console.error('[DELETE /chat/history]', err);
     res.status(500).json({ error: 'Internal server error' });

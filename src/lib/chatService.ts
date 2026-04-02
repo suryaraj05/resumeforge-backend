@@ -44,7 +44,6 @@ import {
 const TIMEOUT_MS = 15000;
 const LONG_TIMEOUT_MS = 130_000;
 const TIMEOUT_REPLY = "I took too long to think. Could you rephrase that?";
-const CHAT_HISTORY_CAP = 100;
 const GEMINI_HISTORY_LIMIT = 10;
 
 // ─── Timeout wrapper ─────────────────────────────────────────────────────────
@@ -482,51 +481,6 @@ const SUGGESTIONS_MAP: Partial<Record<ChatIntent, string[]>> = {
   interview_train: ['Show my applications', 'Find jobs for me'],
   weak_spots: ['Find jobs for me', 'Update my skills'],
 };
-
-// ─── Firestore chat history ───────────────────────────────────────────────────
-
-export async function getChatHistory(userId: string): Promise<StoredChatMessage[]> {
-  const snap = await db
-    .collection('users')
-    .doc(userId)
-    .collection('chatHistory')
-    .orderBy('timestamp', 'asc')
-    .limit(CHAT_HISTORY_CAP)
-    .get();
-
-  return snap.docs.map((d) => d.data() as StoredChatMessage);
-}
-
-export async function saveChatMessages(
-  userId: string,
-  messages: StoredChatMessage[]
-): Promise<void> {
-  const colRef = db.collection('users').doc(userId).collection('chatHistory');
-
-  const batch = db.batch();
-  messages.forEach((msg) => {
-    batch.set(colRef.doc(msg.id), msg);
-  });
-  await batch.commit();
-
-  // Prune to cap — best-effort
-  pruneChatHistoryAsync(userId);
-}
-
-async function pruneChatHistoryAsync(userId: string): Promise<void> {
-  try {
-    const colRef = db.collection('users').doc(userId).collection('chatHistory');
-    const all = await colRef.orderBy('timestamp', 'asc').get();
-    if (all.size > CHAT_HISTORY_CAP) {
-      const toDelete = all.docs.slice(0, all.size - CHAT_HISTORY_CAP);
-      const batch = db.batch();
-      toDelete.forEach((d) => batch.delete(d.ref));
-      await batch.commit();
-    }
-  } catch (err) {
-    console.error('[pruneChatHistoryAsync]', err);
-  }
-}
 
 // ─── Main entry point ─────────────────────────────────────────────────────────
 

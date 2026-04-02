@@ -11,6 +11,7 @@ import {
   usernameAvailable,
 } from '../lib/usernameService';
 import { NotificationDoc } from '../types/groups';
+import { clearAllChatData } from '../lib/chatSessionService';
 
 const router = Router();
 
@@ -373,10 +374,11 @@ router.delete('/account', verifyToken, async (req: AuthRequest, res: Response): 
     const uid = req.uid!;
     const userRef = db.collection('users').doc(uid);
 
+    await clearAllChatData(uid);
+
     // Delete sub-collections
     const collections = [
       'knowledgeBase',
-      'chatHistory',
       'session',
       'notifications',
       'jobProfile',
