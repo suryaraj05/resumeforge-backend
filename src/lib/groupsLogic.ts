@@ -30,6 +30,31 @@ export async function getGroupById(groupId: string): Promise<GroupDoc | null> {
   return { ...(snap.data() as GroupDoc), groupId };
 }
 
+/**
+ * POST-like helper: join a group directly using its ID.
+ * This is used for "join group <groupId>" UX and for users that already have the group ID.
+ */
+export async function joinGroupById(
+  userId: string,
+  groupId: string
+): Promise<{ ok: true; groupName: string } | { ok: false; error: string }> {
+  const group = await getGroupById(groupId);
+  if (!group) return { ok: false, error: 'Group not found' };
+
+  if (group.members?.some((m) => m.userId === userId)) {
+    return { ok: true, groupName: group.name };
+  }
+
+  const now = new Date().toISOString();
+  const newMembers: GroupMember[] = [
+    ...(group.members ?? []),
+    { userId, role: 'member', joinedAt: now },
+  ];
+
+  await db.collection('groups').doc(groupId).update({ members: newMembers });
+  return { ok: true, groupName: group.name };
+}
+
 export async function sendGroupInvite(
   fromUserId: string,
   groupId: string,

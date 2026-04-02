@@ -16,6 +16,7 @@ import {
   listGroupsForUser,
   listAdminGroups,
   sendGroupInvite,
+  joinGroupById,
   peerCompareInGroup,
 } from './groupsLogic';
 import {
@@ -898,6 +899,31 @@ export async function processMessage(
           );
           if (uidMatch) target = uidMatch[1];
         }
+
+        // Support "join <groupId>" / "request group <groupId>"
+        // Users can share a group ID and expect to join with it (not by providing their User ID as "targetUserId").
+        if (!target) {
+          const joinMatch = message.match(
+            /(?:join|request)\s+(?:group\s*)?([a-zA-Z0-9]{20,})\b/i
+          );
+          if (joinMatch) {
+            const groupId = joinMatch[1];
+            const out = await joinGroupById(userId, groupId);
+            if (!out.ok) {
+              return {
+                intent: 'group_add_member',
+                reply: 'That group was not found. Double-check the Group ID and try again.',
+                data: {},
+              };
+            }
+            return {
+              intent: 'group_add_member',
+              reply: `Joined "${out.groupName}". Open the Group tab to see members.`,
+              data: { groupId, suggestions: ['Tell my group what you worked on'] },
+            };
+          }
+        }
+
         if (!target) {
           return {
             intent: 'group_add_member',

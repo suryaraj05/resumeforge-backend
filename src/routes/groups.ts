@@ -5,7 +5,7 @@ import { getKB } from '../lib/kbService';
 import { updateKBSection } from '../lib/kbService';
 import { GroupDoc, GroupMember, NotificationDoc } from '../types/groups';
 import { generateGroupMemberPatch } from '../lib/groupPatchGemini';
-import { createGroup, peerCompareInGroup } from '../lib/groupsLogic';
+import { createGroup, peerCompareInGroup, joinGroupById } from '../lib/groupsLogic';
 
 const router = Router();
 
@@ -375,6 +375,33 @@ router.post('/:groupId/invite/respond', verifyToken, async (req: AuthRequest, re
     }
   } catch (err) {
     console.error('[POST /groups/:groupId/invite/respond]', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * POST /api/groups/:groupId/join
+ * Allows a user to join directly by group ID (used for "join through group id" UX).
+ */
+router.post('/:groupId/join', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const uid = req.uid!;
+    const { groupId } = req.params;
+
+    if (!groupId || !groupId.trim()) {
+      res.status(400).json({ error: 'groupId is required' });
+      return;
+    }
+
+    const out = await joinGroupById(uid, groupId);
+    if (!out.ok) {
+      res.status(404).json({ error: out.error });
+      return;
+    }
+
+    res.status(200).json({ message: `Joined group`, groupId, groupName: out.groupName });
+  } catch (err) {
+    console.error('[POST /groups/:groupId/join]', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
