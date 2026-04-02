@@ -24,9 +24,10 @@ export function getGeminiApiKeyList(): string[] {
     out.push(t);
   };
 
+  /** Comma, newline, or semicolon — so Railway/Vercel pastes "one key per line" still work. */
   const multi = process.env.GEMINI_API_KEYS?.trim();
   if (multi) {
-    for (const part of multi.split(',')) push(part);
+    for (const part of multi.split(/[,\n\r;]+/)) push(part);
     if (out.length > 0) return out;
   }
 

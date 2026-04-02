@@ -30,7 +30,7 @@ import {
 } from '../types/chat';
 
 import { getGeminiModelId } from './geminiModels';
-import { nextGoogleGenerativeAI } from './geminiKeys';
+import { hasGeminiApiKeys, nextGoogleGenerativeAI } from './geminiKeys';
 import { saveInterviewPrep, normalizeStoredQuestions } from './interviewPrepStorage';
 import { createOrUpdateApplicationFromResumeSession } from './applicationsService';
 import {
@@ -193,6 +193,15 @@ async function routeIntent(
   message: string,
   history: StoredChatMessage[]
 ): Promise<IntentRouterResult> {
+  if (!hasGeminiApiKeys()) {
+    return {
+      intent: 'router_failed',
+      params: {},
+      reply:
+        'The server has no Gemini API keys configured. In Railway (or your API host), set GEMINI_API_KEYS (comma or newline separated) or GEMINI_API_KEY, redeploy the API, then try again.',
+    };
+  }
+
   const historyStr = formatHistoryForGemini(history);
   const prompt = `${INTENT_SYSTEM}\n\nConversation history:\n${historyStr || '(none)'}\n\nUser's latest message:\n${message}`;
 
@@ -214,6 +223,7 @@ async function routeIntent(
 
     return parsed;
   } catch (err) {
+    console.error('[routeIntent]', err);
     const st = getGeminiFetchStatus(err);
     if (st === 429) {
       return {
@@ -231,11 +241,32 @@ async function routeIntent(
           'The Gemini model in your server config is not available (404). Set GEMINI_MODEL in apps/api/.env to a model your API key supports.',
       };
     }
+    if (err instanceof Error && err.message === 'TIMEOUT') {
+      return {
+        intent: 'router_failed',
+        params: {},
+        reply:
+          'The AI router timed out (slow network or busy API). Retry in a moment; if it persists, check Railway logs and Gemini status.',
+      };
+    }
+    if (err instanceof SyntaxError) {
+      return {
+        intent: 'router_failed',
+        params: {},
+        reply:
+          'The AI returned an unexpected format for routing. Retry your message; if it keeps happening, check GEMINI_MODEL on the API server.',
+      };
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    const authHint =
+      /API key|API_KEY|permission|401|403|invalid/i.test(msg) &&
+      !/QUOTA|429|resource exhausted/i.test(msg);
     return {
       intent: 'router_failed',
       params: {},
-      reply:
-        "I couldn't reach the AI (routing step). Check GEMINI_API_KEYS / GEMINI_API_KEY, network, and API logs. For profiles without chat AI, use Settings → Import KB from JSON.",
+      reply: authHint
+        ? 'Gemini rejected the request (invalid API key or permission). Verify GEMINI_API_KEYS / GEMINI_API_KEY in Railway and that each key is valid in Google AI Studio.'
+        : "I couldn't reach the AI (routing step). Check GEMINI_API_KEYS / GEMINI_API_KEY on your API server (not Vercel), redeploy after env changes, and inspect Railway logs for [routeIntent] errors.",
     };
   }
 }
