@@ -2,6 +2,8 @@ import { v4 as uuidv4 } from 'uuid';
 import { FieldValue, Timestamp } from 'firebase-admin/firestore';
 import { db } from './firebase';
 import type { ApplicationDoc, ApplicationStatus, ScoredJob } from '../types/jobs';
+import { getSession } from './sessionService';
+import type { RefinedResume, ATSScoreResult } from '../types/resume';
 
 function col(userId: string) {
   return db.collection('users').doc(userId).collection('applications');
@@ -141,6 +143,110 @@ export async function getApplication(
   const snap = await col(userId).doc(applicationId).get();
   if (!snap.exists) return null;
   return snap.data() as ApplicationDoc;
+}
+
+function parseCompanyFromJd(jd: string): string | null {
+  const s = jd.slice(0, 6000);
+  const patterns = [
+    /(?:Company|Employer)\s*[:\-]\s*([A-Za-z0-9&.,'’\- ]{2,80})/i,
+    /(?:at)\s+([A-Z][A-Za-z0-9&.,'’\- ]{2,80})\s*(?:,|\(|$)/i,
+    /(?:About)\s+([A-Za-z0-9&.,'’\- ]{2,80})/i,
+  ];
+  for (const p of patterns) {
+    const m = s.match(p);
+    if (m && m[1]) {
+      const out = String(m[1]).trim();
+      if (out.length >= 2) return out;
+    }
+  }
+  return null;
+}
+
+function parseJobTitleFromText(jd: string, refined?: RefinedResume | null): string | null {
+  if (refined?.targetRole?.trim()) return refined.targetRole.trim();
+  const firstLine = jd.split('\n').map((x) => x.trim()).filter(Boolean)[0] ?? '';
+  if (firstLine) {
+    // Remove some common suffixes
+    return firstLine.replace(/\s+-\s+(responsibilities|requirements).*/i, '').slice(0, 80) || null;
+  }
+  return null;
+}
+
+function parseLocationFromJd(jd: string): string | null {
+  const s = jd.slice(0, 6000);
+  if (/remote/i.test(s)) return 'Remote';
+  const m = s.match(/(?:Location)\s*[:\-]\s*([A-Za-z0-9&.,'’\- ]{2,80})/i);
+  if (m?.[1]) return String(m[1]).trim();
+  return null;
+}
+
+export async function createOrUpdateApplicationFromResumeSession(
+  userId: string
+): Promise<{ ok: true; applicationId: string } | { ok: false; error: string }> {
+  const session = await getSession(userId);
+  const jd = typeof session?.jd === 'string' ? session.jd.trim() : '';
+  const resumeJson = session?.latestResume as RefinedResume | undefined;
+  const coverLetter = session?.lastCoverLetter ?? null;
+  const ats = session?.lastAts as ATSScoreResult | undefined;
+
+  if (!jd || jd.length < 80) {
+    return { ok: false, error: 'No job description (JD) in your resume session. Generate a resume from a JD first.' };
+  }
+  if (!resumeJson) {
+    return { ok: false, error: 'No refined resume found in your resume session.' };
+  }
+
+  const jobTitle = parseJobTitleFromText(jd, resumeJson) ?? 'Role';
+  const company = parseCompanyFromJd(jd) ?? 'Company';
+  const location = parseLocationFromJd(jd) ?? 'Remote';
+
+  const existing = await findApplicationByCompany(userId, company);
+  const atsScore = typeof ats?.score === 'number' ? ats.score : undefined;
+
+  const job: ScoredJob = {
+    jobId: uuidv4(),
+    source: 'apify',
+    externalId: uuidv4(),
+    title: jobTitle,
+    company,
+    location,
+    description: jd,
+    postedAt: undefined,
+    salary: undefined,
+    applyUrl: undefined,
+    logoUrl: undefined,
+    isRemote: /remote/i.test(location),
+    companyDomain: undefined,
+    score: {
+      fitScore: typeof atsScore === 'number' ? atsScore : 0,
+      matchedSkills: [],
+      missingSkills: [],
+      whyThisRole: '',
+      startupSignals: '',
+      salaryFit: false,
+      applyUrgency: 'low',
+    },
+  };
+
+  if (existing?.applicationId) {
+    await updateApplication(userId, existing.applicationId, {
+      resumeJson,
+      coverLetter: coverLetter ?? undefined,
+      atsScore,
+      status: 'saved',
+    });
+    return { ok: true, applicationId: existing.applicationId };
+  }
+
+  const created = await createApplication(userId, {
+    job,
+    status: 'saved',
+    resumeJson,
+    coverLetter: coverLetter ?? undefined,
+    atsScore: atsScore ?? undefined,
+  });
+
+  return { ok: true, applicationId: created.applicationId };
 }
 
 export async function listApplicationsGrouped(userId: string): Promise<{

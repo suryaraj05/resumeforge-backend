@@ -8,6 +8,7 @@ import {
   listApplicationsGrouped,
   getApplication,
 } from '../lib/applicationsService';
+import { createOrUpdateApplicationFromResumeSession } from '../lib/applicationsService';
 import type { ApplicationStatus, ScoredJob } from '../types/jobs';
 
 const router = Router();
@@ -100,6 +101,25 @@ router.put('/:applicationId', verifyToken, async (req: AuthRequest, res: Respons
     console.error('[PUT /applications/:id]', err);
     const msg = err instanceof Error && err.message === 'Application not found' ? 404 : 500;
     res.status(msg).json({ error: err instanceof Error ? err.message : 'Update failed' });
+  }
+});
+
+/**
+ * POST /api/applications/from-resume-session
+ * Uses the latest /api/resume/session (jd + refined resume + cover letter)
+ * to create/update an application document.
+ */
+router.post('/from-resume-session', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const out = await createOrUpdateApplicationFromResumeSession(req.uid!);
+    if (!out.ok) {
+      res.status(400).json({ error: out.error });
+      return;
+    }
+    res.json({ ok: true, applicationId: out.applicationId });
+  } catch (err) {
+    console.error('[POST /applications/from-resume-session]', err);
+    res.status(500).json({ error: 'Failed to save application from resume session' });
   }
 });
 

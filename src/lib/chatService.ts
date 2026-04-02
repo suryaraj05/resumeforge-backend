@@ -32,6 +32,7 @@ import {
 
 import { getGeminiModelId } from './geminiModels';
 import { saveInterviewPrep, normalizeStoredQuestions } from './interviewPrepStorage';
+import { createOrUpdateApplicationFromResumeSession } from './applicationsService';
 import {
   handleJobSearchIntent,
   handleJobPrepareIntent,
@@ -815,6 +816,14 @@ export async function processMessage(
           generateCoverLetter(sessionCl.jd, sessionCl.latestResume)
         );
         await saveSession(userId, { lastCoverLetter: letter });
+
+        // Make the generated resume + cover letter appear in "My Applications".
+        // This turns the chat-generated JD/resume artifacts into an application tracker row
+        // so users can continue with interview Q&A and status tracking.
+        createOrUpdateApplicationFromResumeSession(userId).catch((e) =>
+          console.error('[AUTO SAVE applications from cover_letter]', e)
+        );
+
         return {
           intent: 'cover_letter',
           reply:
