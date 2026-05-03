@@ -1,18 +1,18 @@
 <div align="center">
 
-# ResumeForge Web
+# ResumeForge API
 
-### Next.js client for AI chat, knowledge base, resumes, and interview practice
+### AI-assisted resume, knowledge base, and interview preparation - backend service
 
-[![Next.js](https://img.shields.io/badge/Next.js-14-000000?logo=next.js&logoColor=white)](https://nextjs.org)
-[![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)](https://react.dev)
+[![Node.js](https://img.shields.io/badge/Node.js-18+-339933?logo=node.js&logoColor=white)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
-[![Tailwind CSS](https://img.shields.io/badge/Tailwind-3-06B6D4?logo=tailwindcss&logoColor=white)](https://tailwindcss.com)
-[![Firebase](https://img.shields.io/badge/Firebase-Auth%20%28client%29-FFCA28?logo=firebase&logoColor=black)](https://firebase.google.com)
+[![Express](https://img.shields.io/badge/Express-4.x-000000?logo=express&logoColor=white)](https://expressjs.com)
+[![Firebase](https://img.shields.io/badge/Firebase-Admin%20%7C%20Firestore%20%7C%20Auth-FFCA28?logo=firebase&logoColor=black)](https://firebase.google.com)
+[![Gemini](https://img.shields.io/badge/Google%20Gemini-Generative%20AI-4285F4?logo=google&logoColor=white)](https://ai.google.dev)
 
-> A **Next.js 14 (App Router)** front end: multi-session **agent-style chat**, tabbed **activity** tools, **resizable** three-column layout, **rich message cards** (diffs, resume changes, job cards), and a **Web Speech**-based **interview coach** — all calling the ResumeForge API with **Firebase ID tokens**.
+> Stateful **Express** API: Firebase-verified users, **Firestore** persistence, **Google Gemini** for routing and generation - with **multi-key round-robin**, **merge-safe KB writes**, and **structured chat payloads** so the web UI can confirm updates after refresh.
 
-[Problem & solution](#the-problem) • [Architecture](#architecture) • [State & data flow](#state--data-flow) • [Features ↔ code](#feature-to-implementation) • [Routes](#app-router-routes) • [Packages](#key-dependencies) • [Config & security](#configuration--security) • [Quick start](#quick-start)
+[Problem & solution](#the-problem) · [Architecture](#architecture) · [AI design](#ai--chat-design) · [Data model](#data-model-firestore) · [API reference](#api-reference) · [Packages](#key-npm-dependencies) · [Environment](#environment-variables) · [Quick start](#quick-start)
 
 </div>
 
@@ -20,182 +20,344 @@
 
 ## The problem
 
-Typical “AI resume” products either:
+Job seekers juggle **scattered facts** (resume files, bullet lists, JD text) and generic chat tools that:
 
-- Chat in a **single** thread with no durable **session** model  
-- Show **wall-of-text** responses with no **before/after** for KB or resume changes  
-- Use a **fixed** layout that wastes space for sessions vs. tools  
-- Offload “interview practice” to a **separate** product with no link to the same **KB + JD** the user already has here  
+- **Hallucinate or overwrite** structured profile data instead of merging safely
+- **Lose context** across tabs, refreshes, and "confirm this change" flows
+- **Hit API quotas** quickly when every chat turn triggers multiple LLM calls
 
 ---
 
 ## The solution
 
-This app provides:
+ResumeForge API provides a **single authenticated backend** where:
 
-1. **Per-chat sessions** — list, create, delete, auto-title from first message (`ChatSessionsSidebar` + `/api/chat/sessions*`).  
-2. **Three-column workspace** — **react-resizable-panels** v4 (`Group` / `Panel` / `Separator`) with **persisted layout** via `useDefaultLayout` (localStorage, id `rf-chat-layout`).  
-3. **Trust surfaces** — `DiffCard` for KB patches; `ResumeDiffCard` when a new tailored resume differs from the previous session snapshot; toasts on API errors.  
-4. **Interview prep** — server-generated question sets in the right tab, plus embedded **`InterviewCoachPractice`** (TT / TV / VT / VV) and a full-page **`/interview/coach`**.  
-5. **Auth-aware API client** — Axios instance injects `Authorization: Bearer <ID token>` and redirects on **401** (`lib/api.ts`).
+1. **Resume upload → KB extraction** grounds every later AI call in a canonical **knowledge base** document per user.
+2. **Intent-based chat** routes user text through Gemini (`routeIntent` → handlers like `update_kb`, `generate_resume`, `interview_prep`).
+3. **KB section updates** apply **merge-by-id** for array sections and **shallow merge** for objects, then **sanitize** before Firestore write - avoiding blind full-section replacement that drops rows.
+4. **Multiple Gemini API keys** rotate **round-robin** (`nextGoogleGenerativeAI`) so heavy usage spreads across keys.
+5. **Chat sessions + messages** persist to Firestore; critical bot rows (e.g. `update_kb`) include bounded **`data`** so "Confirm" still works after reload.
 
 ---
 
-## Features (product)
+## Features
 
-| Area | What the user gets |
-|------|-------------------|
-| **Chat** | Markdown assistant replies, intent chips, continuations for group/peer flows |
-| **KB** | Summary panel, import JSON (settings), diff + confirm for `update_kb` |
-| **Resume** | Live preview, ATS, cover letter hooks, **full preview** in `/chat/resume-full` (print-friendly) |
-| **Group** | Invites, bulk update flows driven from chat continuations |
-| **Interview** | General + role-specific questions; **voice coach** in-tab and standalone |
-| **Applications** | Tracker-style panel tied to API |
-| **Jobs** | Explorer / search integration where configured |
+| Area | Capability |
+|------|------------|
+| **Auth** | Firebase ID token verification (`Authorization: Bearer`) via Admin SDK |
+| **Knowledge base** | Versioned KB, history, JSON import, section patch with normalization (`normalizeKbSection`), rollback |
+| **Chat** | Per-user sessions; `POST /message` with `sessionId`, history, optional **continuations** (group pick, peer compare) |
+| **Intent routing** | Gemini classifies user message → structured intent + params |
+| **Resume / session** | Tailored generation, ATS, cover letter, job fit, PDF export; session holds JD + `latestResume` for diffs |
+| **Interview prep** | General vs role-specific questionnaires (Gemini + KB), persisted with JD fingerprint for staleness |
+| **Groups** | Create, invite, bulk KB updates, peer comparison |
+| **Jobs (optional)** | Search / profile / salary intel when third-party keys are set |
+| **Rate limiting** | `geminiRateLimit` on chat and other Gemini-heavy routes |
+| **Ops** | `/health`, `/api/health`, Helmet, CORS allow-list, structured logging (`morgan`) |
 
 ---
 
 ## Architecture
 
-### Browser layers
-
 ```mermaid
 flowchart TB
-  subgraph app["Next.js App Router"]
-    PAGES["app/*/page.tsx\n(client + server boundaries)"]
-    CTX["AuthContext · providers"]
+  subgraph clients["Clients"]
+    WEB["Next.js web app"]
   end
 
-  subgraph chat_ui["Chat surface"]
-    PAGE["app/chat/page.tsx"]
-    SIDEBAR["ChatSessionsSidebar"]
-    BUBBLE["MessageBubble"]
-    INPUT["ChatInput"]
-    ACT["KBSummaryPanel · ResumePanel · …"]
+  subgraph api["API - Express"]
+    MW["Middleware\nverifyToken · geminiRateLimit · helmet · cors"]
+    R_AUTH["/api/auth"]
+    R_PROF["/api/profile"]
+    R_CHAT["/api/chat"]
+    R_RES["/api/resume"]
+    R_GRP["/api/groups"]
+    R_JOB["/api/jobs"]
+    R_APP["/api/applications"]
+    R_INT["/api/interview"]
   end
 
-  subgraph data["Client data"]
-    HOOK["hooks/useChat.ts"]
-    API["lib/api.ts\naxios + JWT"]
+  subgraph firebase["Firebase (GCP)"]
+    FAUTH["Firebase Auth\n(ID tokens)"]
+    FS[("Cloud Firestore\nusers · KB · sessions · …")]
+    FST["Cloud Storage\n(resume uploads)"]
   end
 
-  subgraph remote["Backend"]
-    BE["ResumeForge API\nExpress /api/*"]
+  subgraph ai["Google AI"]
+    GEM["Gemini\n@google/generative-ai"]
   end
 
-  PAGES --> chat_ui
-  CTX --> HOOK
-  PAGE --> HOOK
-  HOOK --> API
-  API -->|"HTTPS"| BE
+  WEB -->|"HTTPS + Bearer JWT"| MW
+  MW --> R_AUTH & R_PROF & R_CHAT & R_RES & R_GRP & R_JOB & R_APP & R_INT
+  R_AUTH --> FAUTH
+  R_PROF --> FS
+  R_CHAT --> FS
+  R_CHAT --> GEM
+  R_RES --> FS
+  R_RES --> GEM
+  R_GRP --> FS
+  R_JOB --> GEM
+  R_APP --> FS
 ```
 
-### API base URL resolution
+### Request pipeline (authenticated route)
 
-`lib/api.ts`:
-
-- If **`NEXT_PUBLIC_API_URL`** is set → Axios `baseURL` is that origin (e.g. `https://api.example.com` or `http://localhost:4000`).  
-- If **unset** → `baseURL` is **empty** → requests are **same-origin** (browser calls `/api/...` on the Next host). **You must** configure your deployment (reverse proxy, separate API host, or rewrites) so those requests reach the Express API.
-
-> The repo’s `next.config.mjs` sets **COOP** headers (`same-origin-allow-popups`) for Firebase Auth popups — not API routing.
+```mermaid
+flowchart LR
+  REQ[HTTP request] --> HEL[helmet]
+  HEL --> CORS[cors ALLOWED_ORIGIN]
+  CORS --> JSON[express.json limit 10mb]
+  JSON --> LOG[morgan]
+  LOG --> VT{verifyToken}
+  VT -->|invalid / missing| E401[401]
+  VT -->|uid on req| RL{geminiRateLimit?}
+  RL --> H[Route handler]
+  H --> RES2[JSON response]
+```
 
 ---
 
-## State & data flow
+## AI & chat design
 
-### `useChat` (conceptual)
+### Perceive → route → act
+
+The chat stack is **not** a single open-ended completion: it **routes** first, then runs **domain handlers** that may perform multiple Gemini calls and Firestore reads/writes.
 
 ```mermaid
 sequenceDiagram
-  participant UI as Chat page / MessageBubble
-  participant UC as useChat
-  participant API as lib/api
-  participant SRV as Express API
+  autonumber
+  actor U as User
+  participant API as POST /api/chat/message
+  participant CS as chatService.processMessage
+  participant R as routeIntent (Gemini)
+  participant H as Intent handler
+  participant G as Gemini (round-robin)
+  participant FS as Firestore
 
-  UI->>UC: sendMessage(text)
-  UC->>API: POST /api/chat/message + sessionId
-  API->>SRV: processMessage
-  SRV-->>API: intent + reply + data
-  API-->>UC: response
-  UC->>UC: merge messages, handle intents
-  UC-->>UI: re-render
-
-  Note over UC,SRV: KB confirm calls POST /api/profile/kb/update
+  U->>API: message + history + sessionId
+  API->>CS: processMessage(uid, …)
+  CS->>R: Classify intent + params
+  R->>G: Router prompt
+  G-->>R: intent JSON
+  alt update_kb
+    CS->>H: handleUpdateKB(section, …)
+    H->>G: Patch generation
+    G-->>H: patch + summary
+  else generate_resume
+    CS->>FS: load session (previous latestResume)
+    CS->>H: generateRefinedResume + diff vs prior
+  end
+  CS->>FS: appendSessionMessages (async)
+  CS-->>API: ChatResponse intent + reply + data
 ```
 
-### Session lifecycle
+### What makes it "agentic" (structured control flow)
 
-1. User picks or creates **session** → `activeSessionId` drives **history load** and **message append** on send.  
-2. Switching sessions loads **stored messages** from API so **DiffCard** metadata (`update_kb` `data`) is restored when persisted server-side.  
-3. **Right panel** tabs (`kb` \| `resume` \| `group` \| `interview` \| `applications`) are local UI state (`activeRightTab`) — not URL-routed in v1.
+| Property | Implementation |
+|----------|----------------|
+| **Route** | `routeIntent` returns `{ intent, params, reply }` - downstream code switches on `intent`, not raw prose |
+| **Structured UI state** | `update_kb` bot messages persist `data: { section, patch, patchSummary, currentSection }` for DiffCard + confirm |
+| **Merge safety** | `updateKBSection` merges arrays by stable `id`, objects shallow-merge; then `sanitizeGeminiKbResponse` |
+| **Timeouts** | Long Gemini steps wrapped (e.g. `withTimeout`) to avoid hung requests |
+| **Quota spread** | `nextGoogleGenerativeAI()` picks the next key per operation from env-configured pool |
 
-### Resizable layout (desktop)
+### Gemini API keys - resolution & rotation
 
-- **Library:** `react-resizable-panels` v4 — components **`Group`**, **`Panel`**, **`Separator`**.  
-- **Persistence:** `useDefaultLayout({ id: "rf-chat-layout", panelIds: ["sessions","chat","activity"], storage: localStorage })` → `defaultLayout` + `onLayoutChanged` on **`Group`**.  
-- **Panel IDs:** stable strings so saved percentages map correctly.  
-- **Collapsible right activity:** `PanelImperativeHandle` (`collapse` / `expand`) from header toggle on **`md+`**; mobile uses drawer / overlay patterns.
+Implementation: `src/lib/geminiKeys.ts`.
 
----
+1. **`GEMINI_API_KEYS`** - split on comma, newline, or semicolon; duplicates removed.
+2. **`GEMINI_API_KEY_1` & `GEMINI_API_KEY_10`** - if step 1 yields nothing.
+3. **`GEMINI_API_KEY`** - single fallback.
 
-## Feature ↔ implementation
-
-| Feature | Primary files / routes |
-|---------|-------------------------|
-| Session list & CRUD | `components/chat/ChatSessionsSidebar.tsx`, `/api/chat/sessions` |
-| Message rendering | `components/chat/MessageBubble.tsx` — Markdown, `DiffCard`, `ResumeDiffCard`, `InterviewPrepCard`, chips |
-| KB diff / confirm | `components/chat/DiffCard.tsx`, `hooks/useChat.ts` → `confirmKBUpdate` → `POST /api/profile/kb/update` |
-| Resume panel | `components/resume/ResumePanel.tsx`, `/api/resume/session` |
-| Full-page preview | `app/chat/resume-full/page.tsx`, templates under `components/resume/templates/` |
-| Interview lists + embedded coach | `components/chat/InterviewPrepPanel.tsx`, `components/chat/InterviewCoachPractice.tsx` |
-| Standalone coach | `app/interview/coach/page.tsx` |
-| Speech helpers | `lib/interviewCoachSpeech.ts` |
-| Toast feedback | `react-hot-toast` via UI wrappers |
-
-### Interview coach (technical)
-
-- **TTS:** `speechSynthesis` + `SpeechSynthesisUtterance`; voice list from `getVoices()` + `voiceschanged`.  
-- **STT:** `SpeechRecognition` / `webkitSpeechRecognition` wrapped as **`SpeechRecognitionLike`** types (DOM typings vary).  
-- **Motion:** CSS pulse on an orb; gated by **`prefers-reduced-motion`**.  
-- **Modes:** `tt` \| `tv` \| `vt` \| `vv` — same component in tab (**compact**) and full page.
+Rotation is **module-level round-robin** (not sticky per user): each call to `nextGoogleGenerativeAI()` advances an index modulo key count.
 
 ---
 
-## App Router routes
+## Data model (Firestore)
 
-| Route | Role |
-|-------|------|
-| `/` | Landing |
-| `/auth` | Firebase auth |
-| `/chat` | Main workspace |
-| `/chat/resume-full` | Print-friendly resume (`useSearchParams` for template — wrapped in **Suspense**) |
-| `/interview/coach` | Standalone coach |
-| `/profile`, `/settings`, `/activity`, `/jobs`, `/onboarding`, … | Feature pages |
+Conceptual schema (collection names are illustrative; see `lib/*Service` for exact paths).
+
+```mermaid
+erDiagram
+  USER ||--o| KNOWLEDGE_BASE : owns
+  USER ||--o{ CHAT_SESSION : has
+  CHAT_SESSION ||--o{ CHAT_MESSAGE : contains
+  USER ||--o| RESUME_SESSION : has
+  USER ||--o{ APPLICATION : tracks
+  USER ||--o{ GROUP : membership
+
+  USER {
+    string uid PK
+    string email
+    string displayName
+    string username "optional public handle"
+  }
+
+  KNOWLEDGE_BASE {
+    map sections "personal, experience, …"
+    number version
+    timestamp updatedAt
+  }
+
+  CHAT_SESSION {
+    string sessionId PK
+    string title
+    timestamp updatedAt
+  }
+
+  CHAT_MESSAGE {
+    string id
+    string role "user | bot"
+    string content
+    string intent "optional"
+    map data "bounded payload for UI"
+  }
+
+  RESUME_SESSION {
+    string jd "job description text"
+    object latestResume "refined JSON"
+    object ats "optional"
+  }
+```
 
 ---
 
-## Key dependencies
+## API reference
+
+Base path: **`/api`** (mount point in `src/index.ts`). All authenticated routes expect:
+
+```http
+Authorization: Bearer <Firebase ID token>
+```
+
+### Health
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET` | `/health` | No | Liveness JSON |
+| `GET` | `/api/health` | No | Same (proxy-friendly) |
+
+### Auth (`/api/auth`)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/onboard` | First-time user profile setup |
+| `GET` | `/me` | Current user doc |
+
+### Profile (`/api/profile`)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/public/:username` | Public profile (no auth) |
+| `GET` | `/` | Authenticated profile |
+| `PATCH` | `/` | Update profile fields |
+| `GET` | `/kb` | Knowledge base |
+| `POST` | `/kb/import` | Import KB JSON |
+| `POST` | `/kb/update` | Section patch (`section`, `patch`) - merged server-side |
+| `GET` | `/kb/history` | KB version history |
+| `POST` | `/kb/rollback` | Restore version |
+| `GET` | `/notifications` | Notifications |
+| `PUT` | `/settings` | User settings |
+| `GET` | `/activity` | Activity feed |
+| `POST` | `/notifications/mark-read` | Mark read |
+| `DELETE` | `/account` | Delete account |
+
+### Chat (`/api/chat`)
+
+| Method | Path | Notes |
+|--------|------|------|
+| `POST` | `/message` | **`sessionId` required**; optional `continuation` |
+| `GET` | `/sessions` | List sessions |
+| `POST` | `/sessions` | Create session |
+| `PATCH` | `/sessions/:sessionId` | Rename |
+| `DELETE` | `/sessions/:sessionId` | Delete |
+| `GET` | `/history` | Legacy/global history if implemented |
+| `DELETE` | `/history` | Clear |
+| `GET` | `/interview-prep` | Saved prep + `jdStale` |
+| `POST` | `/interview-prep` | Body: `{ mode: 'general' \| 'role', jd? }` |
+
+**Example: chat message**
+
+```json
+{
+  "sessionId": "uuid-session-id",
+  "message": "Update my experience section to add …",
+  "history": []
+}
+```
+
+**Example: KB section update (confirm from UI)**
+
+```json
+{
+  "section": "experience",
+  "patch": [ { "id": "…", "company": "…", "title": "…" } ]
+}
+```
+
+### Resume (`/api/resume`)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/session` | JD + latest refined resume + metadata |
+| `POST` | `/generate` | Trigger generation (see route body) |
+| `POST` | `/pdf` | PDF export |
+| `POST` | `/ats` | ATS scoring |
+| `POST` | `/cover-letter` | Cover letter |
+| `POST` | `/job-fit` | Fit assessment |
+| `GET` | `/latest` | Latest artifact shortcut |
+
+### Groups (`/api/groups`)
+
+Create, list, invites, **bulk-update** preview/apply, **peer-compare**.
+
+### Applications (`/api/applications`)
+
+CRUD + `from-resume-session` linkage.
+
+### Jobs (`/api/jobs`)
+
+Optional integrations: search, profile, weak spots, salary intel (requires env keys).
+
+### Interview career (`/api/interview`)
+
+Job-application-style interview sessions (separate from chat interview-prep questionnaires).
+
+---
+
+## Key npm dependencies
 
 | Package | Role |
 |---------|------|
-| `next` | Framework, App Router, SSR/SSG hybrid |
-| `react` / `react-dom` | UI |
-| `axios` | HTTP + interceptors |
-| `firebase` | Client Auth |
-| `react-markdown` + `remark-gfm` | Assistant Markdown |
-| `react-resizable-panels` | Layout |
-| `react-hot-toast` | Notifications |
+| `express` | HTTP server and routing |
+| `firebase-admin` | Verify ID tokens, Firestore, Storage |
+| `@google/generative-ai` | Gemini client construction per key |
+| `cors` | Origin allow-list |
+| `helmet` | Security headers |
+| `morgan` | Request logging |
+| `dotenv` | Local configuration |
+| `multer` | Multipart uploads |
+| `pdf-parse` | Resume PDF text extraction |
+| `puppeteer` | PDF / rendering where used |
+| `uuid` | Message and session IDs |
 
 ---
 
-## Configuration & security
+## Environment variables
 
-| Topic | Detail |
-|-------|--------|
-| **Env** | `.env.local` — `NEXT_PUBLIC_*` only for non-secret browser values |
-| **Tokens** | Short-lived ID tokens attached per request; refresh handled by Firebase SDK |
-| **401** | Global interceptor redirects to `/auth` |
-| **COOP** | `next.config.mjs` headers for OAuth popups |
+Copy **`.env.example`** → **`.env`**. Critical entries:
+
+| Variable | Purpose |
+|----------|---------|
+| `FIREBASE_SERVICE_ACCOUNT_JSON` *or* `FIREBASE_ADMIN_*` | Admin SDK credentials |
+| `FIREBASE_STORAGE_BUCKET` | Storage bucket name |
+| `GEMINI_API_KEYS` or `GEMINI_API_KEY_*` or `GEMINI_API_KEY` | Gemini pool |
+| `GEMINI_MODEL` | Optional; else startup probe picks a working model |
+| `PORT` | Listen port (default **4000**) |
+| `ALLOWED_ORIGIN` | Comma-separated CORS origins (prod + preview URLs) |
+| `APP_PUBLIC_URL` | Public web origin for links |
+
+Optional: `JSEARCH_API_KEY`, `ADZUNA_*`, `APIFY_API_TOKEN`, `SERPAPI_KEY` - see `.env.example`.
 
 ---
 
@@ -203,83 +365,60 @@ sequenceDiagram
 
 ### Prerequisites
 
-- Node.js **≥ 18**  
-- Firebase **web app** config (`NEXT_PUBLIC_*`)  
-- Running **ResumeForge API** (or deployed URL)
+- **Node.js >= 18**
+- Firebase project (**Auth** + **Firestore** + **Storage**)
+- At least one **Gemini API key**
 
-### Commands
+### Run locally
 
 ```bash
-cd apps/web
-cp .env.local.example .env.local   # if present; else create per team docs
+cd apps/api
+cp .env.example .env
+# Fill Firebase admin fields and GEMINI_* keys
 npm install
 npm run dev
 ```
 
-Open **`http://localhost:3000`**.
-
-Typical `.env.local`:
+Server listens on **`http://localhost:4000`** (or `PORT`). Verify:
 
 ```bash
-NEXT_PUBLIC_API_URL=http://localhost:4000
-# Plus NEXT_PUBLIC_FIREBASE_* from Firebase console
+curl http://localhost:4000/health
+# {"status":"ok","timestamp":"…"}
 ```
 
-### Production
+### Build & production
 
 ```bash
-npm run build
-npm start
+npm run build    # tsc → dist/
+npm start        # node dist/index.js
 ```
 
 | Script | Purpose |
 |--------|---------|
-| `npm run dev` | Dev server |
-| `npm run build` | `next build` |
-| `npm run lint` | ESLint |
-| `npm run deploy` | Vercel (if configured) |
+| `npm run dev` | `ts-node-dev` hot reload |
+| `npm run build` | Typecheck + emit |
+| `npm run gemini:probe` | Probe configured Gemini model IDs |
 
 ---
 
-## Folder structure
+## Design trade-offs
 
-```text
-apps/web/
-├── app/                      # Routes (App Router)
-│   ├── chat/
-│   │   ├── page.tsx          # Main 3-pane UI
-│   │   └── resume-full/
-│   │       └── page.tsx      # Full resume preview + Suspense
-│   ├── interview/coach/
-│   ├── layout.tsx
-│   └── …
-├── components/
-│   ├── chat/                 # Bubble, DiffCard, coach, sessions, …
-│   ├── resume/               # Panel, templates, ATS
-│   ├── kb/
-│   ├── jobs/
-│   └── ui/
-├── context/                  # AuthContext
-├── hooks/                    # useChat
-├── lib/                      # api.ts, utils, interviewCoachSpeech.ts
-├── types/                    # Shared TS types
-└── next.config.mjs
-```
+> **Express vs serverless functions:** A long-lived Node process fits **WebSocket-free** batching, shared rate-limit state, and predictable Puppeteer use - deploy targets include Railway, Render, Fly, or VM.
+
+> **Firestore vs SQL:** User-scoped documents map naturally to KB versions, chat sessions, and resume sessions; complex joins are avoided in favor of denormalized session snapshots.
+
+> **Round-robin vs sticky routing:** Simplicity and even spread across keys; per-user affinity can be added later if needed.
 
 ---
 
-## Why this front end is structured this way
+## Related
 
-> **App Router:** File-system routing, lazy boundaries, and **Suspense** for hooks like `useSearchParams` that suspend during static generation.
-
-> **Fat `MessageBubble`:** Intent-specific cards stay **colocated** with chat rendering — avoids a giant switch in one template string and keeps **feature parity** with server `intent` enums.
-
-> **Embedded + page coach:** **DRY** practice UI — same `InterviewCoachPractice` in **Interview Prep** tab and **`/interview/coach`**.
+- Client app: [`../web/README.md`](../web/README.md)
 
 ---
 
 <div align="center">
 
-Backend companion: [`../api/README.md`](../api/README.md)
+**ResumeForge** - structured AI around real career data.
 
 </div>
